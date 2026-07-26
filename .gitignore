@@ -1,0 +1,31 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+*.egg-info
+.venv/
+.mypy_cache/
+.ruff_cache/
+.pytest_cache/
+build/
+dist/
+*.whl
+*.tar.gz
+*.tgz
+
+# Node / TypeScript
+node_modules/
+dist/
+dist-tests/
+
+# Coverage / misc
+.coverage
+htmlcov/
+*.log
+
+# Local state / env
+.env
+.env.*
+# Lockfile is re-resolved against the permanent inter-agent-core repository during
+# item 13 / prepublication (the temporary local candidate path source must not ship).
+uv.lock

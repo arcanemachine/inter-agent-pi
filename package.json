@@ -1,0 +1,65 @@
+{
+  "name": "inter-agent-pi",
+  "version": "0.2.0",
+  "description": "Pi extension for connecting to the inter-agent message bus",
+  "type": "module",
+  "scripts": {
+    "build": "tsc",
+    "watch": "tsc --watch",
+    "typecheck": "tsc --noEmit",
+    "test": "tsc -p tsconfig.test.json && node --test --test-concurrency=1 dist-tests/tests/typescript/*.test.js",
+    "format": "prettier --write src/index.ts src/mailbox.ts tests/**/*.ts README.md package.json tsconfig.json tsconfig.test.json"
+  },
+  "keywords": [
+    "pi",
+    "pi-coding-agent",
+    "extension",
+    "inter-agent",
+    "message-bus",
+    "pi-package"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/arcanemachine/inter-agent-pi.git"
+  },
+  "homepage": "https://github.com/arcanemachine/inter-agent-pi",
+  "bugs": {
+    "url": "https://github.com/arcanemachine/inter-agent-pi/issues"
+  },
+  "pi": {
+    "extensions": [
+      "./src/index.ts"
+    ]
+  },
+  "author": "Nicholas Moen",
+  "license": "MIT",
+  "dependencies": {
+    "typebox": "^1.1.38"
+  },
+  "devDependencies": {
+    "@earendil-works/pi-coding-agent": "^0.81.1",
+    "@earendil-works/pi-tui": "^0.81.1",
+    "@types/node": "^25.3.0",
+    "prettier": "^3.8.3",
+    "typescript": "^5.7.2"
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "^0.81.1",
+    "@earendil-works/pi-tui": "^0.81.1"
+  },
+  "peerDependenciesMeta": {
+    "@earendil-works/pi-coding-agent": {
+      "optional": true
+    },
+    "@earendil-works/pi-tui": {
+      "optional": true
+    }
+  },
+  "files": [
+    "src/index.ts",
+    "src/mailbox.ts",
+    "README.md",
+    "CHANGELOG.md",
+    "LICENSE.md"
+  ]
+}

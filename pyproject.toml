@@ -1,0 +1,68 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "inter-agent-pi"
+version = "0.2.0"
+description = "Pi helper for the inter-agent message bus: connect listener and command-line tools"
+readme = "README.md"
+requires-python = ">=3.10"
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Intended Audience :: Developers",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.10",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Topic :: Communications",
+]
+dependencies = [
+  "inter-agent-core==0.2.0",
+  "websockets==16.0",
+]
+
+[project.scripts]
+inter-agent-pi = "inter_agent_pi.cli:main"
+
+[dependency-groups]
+dev = [
+  "pytest==9.0.3",
+  "pytest-asyncio==1.3.0",
+  "ruff==0.15.12",
+  "black==26.3.1",
+  "mypy==1.20.2",
+]
+
+[tool.uv.sources]
+# Migration-only local resolution against the temporary inter-agent-core candidate
+# staged during item 11. Removed and re-locked against the permanent
+# inter-agent-core repository during item 13 / prepublication cleanup. Never
+# publish while this path source remains.
+inter-agent-core = { path = "../../tmp/inter-agent-pi-extraction/core-candidate" }
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+
+[tool.black]
+line-length = 100
+target-version = ["py312"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP"]
+
+[tool.mypy]
+python_version = "3.12"
+strict = true
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+module = ["tests.*"]
+disallow_untyped_defs = false
