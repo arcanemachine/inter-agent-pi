@@ -1147,7 +1147,7 @@ async function stopListener(
 
 function updateStatus(ctx: ExtensionContext, state: ConnectionState | null) {
   if (state?.connected) {
-    ctx.ui.setStatus("inter-agent", `Inter-agent: ${state.name} 🌐 `);
+    ctx.ui.setStatus("inter-agent", `IA: ${state.name} 🌐 `);
   } else {
     ctx.ui.setStatus("inter-agent", undefined);
   }
