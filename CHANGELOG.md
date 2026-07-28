@@ -34,7 +34,7 @@ is not yet published to a package registry.
 
 ### Runtime dependency
 
-- Depends on `inter-agent-core` (`0.2.0`) and `websockets` (`16.0`). During
-  the repository split this dependency was resolved against a temporary local
-  `inter-agent-core` candidate; the lock is re-resolved against the permanent
-  `inter-agent-core` repository before any publication.
+- Depends on `inter-agent-core` (`0.2.0`) and `websockets` (`16.0`). The
+  committed prepublication lock resolves core from the permanent core root
+  pinned in `tool.uv.sources`; extension release work removes that source and
+  re-locks against the published core package before publication.

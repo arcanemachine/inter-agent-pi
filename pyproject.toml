@@ -35,11 +35,9 @@ dev = [
 ]
 
 [tool.uv.sources]
-# Migration-only local resolution against the temporary inter-agent-core candidate
-# staged during item 11. Removed and re-locked against the permanent
-# inter-agent-core repository during item 13 / prepublication cleanup. Never
-# publish while this path source remains.
-inter-agent-core = { path = "../../tmp/inter-agent-pi-extraction/core-candidate" }
+# Prepublication resolution against the permanent core root. Extension release
+# work removes this source and re-locks against the published core package.
+inter-agent-core = { git = "https://github.com/arcanemachine/inter-agent-core.git", rev = "21b9e70da8a01c5345df4ca9680ad7eff0c81072" }
 
 [tool.setuptools.packages.find]
 where = ["src"]
