@@ -548,9 +548,14 @@ def test_pi_package_declares_pi_runtime_peers() -> None:
     manifest = json.loads(PI_PACKAGE.read_text(encoding="utf-8"))
 
     assert manifest["name"] == "@arcanemachine/inter-agent-pi"
+    assert manifest["version"] == "0.2.1"
     assert manifest.get("private") is not True
     assert "pi-package" in manifest["keywords"]
     assert manifest["pi"]["extensions"] == ["./src/index.ts"]
+    assert (
+        manifest["pi"]["image"]
+        == "https://raw.githubusercontent.com/arcanemachine/inter-agent-pi/main/logo.png"
+    )
     assert "typebox" not in manifest.get("dependencies", {})
     assert manifest["devDependencies"]["typebox"] == "1.1.38"
     expected_peers = {

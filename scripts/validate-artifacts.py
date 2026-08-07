@@ -16,8 +16,10 @@ import zipfile
 from pathlib import Path
 
 EXPECTED_NPM_NAME = "@arcanemachine/inter-agent-pi"
-EXPECTED_VERSION = "0.2.0"
+EXPECTED_NPM_VERSION = "0.2.1"
+EXPECTED_PI_IMAGE = "https://raw.githubusercontent.com/arcanemachine/inter-agent-pi/main/logo.png"
 EXPECTED_PY_NAME = "inter-agent-pi"
+EXPECTED_PY_VERSION = "0.2.0"
 EXPECTED_CORE_DEP = "inter-agent-core==0.2.0"
 EXPECTED_WS_DEP = "websockets==16.0"
 EXPECTED_PI_PEERS = {
@@ -70,8 +72,8 @@ def validate_npm(tgz: Path) -> None:
     manifest = read_npm_manifest(tgz)
     if manifest.get("name") != EXPECTED_NPM_NAME:
         fail(f"npm name={manifest.get('name')!r} expected {EXPECTED_NPM_NAME!r}")
-    if manifest.get("version") != EXPECTED_VERSION:
-        fail(f"npm version={manifest.get('version')!r} expected {EXPECTED_VERSION!r}")
+    if manifest.get("version") != EXPECTED_NPM_VERSION:
+        fail(f"npm version={manifest.get('version')!r} expected {EXPECTED_NPM_VERSION!r}")
     if manifest.get("private") is True:
         fail("npm package is private")
     if manifest.get("publishConfig", {}).get("access") != "public":  # type: ignore[union-attr]
@@ -94,6 +96,8 @@ def validate_npm(tgz: Path) -> None:
         fail("all Pi peer dependencies must be optional")
     if manifest.get("pi", {}).get("extensions") != ["./src/index.ts"]:  # type: ignore[union-attr]
         fail(f"npm pi.extensions={manifest.get('pi', {}).get('extensions')!r}")  # type: ignore[union-attr]
+    if manifest.get("pi", {}).get("image") != EXPECTED_PI_IMAGE:  # type: ignore[union-attr]
+        fail(f"npm pi.image={manifest.get('pi', {}).get('image')!r}")  # type: ignore[union-attr]
     files = set(manifest.get("files", []))  # type: ignore[union-attr]
     if files != {"src/index.ts", "src/mailbox.ts", "README.md", "CHANGELOG.md", "LICENSE.md"}:
         fail(f"npm files allowlist={sorted(files)!r}")
@@ -134,8 +138,8 @@ def validate_wheel(whl: Path) -> None:
     meta = wheel_metadata(whl)
     if f"Name: {EXPECTED_PY_NAME}" not in meta:
         fail(f"wheel Name not {EXPECTED_PY_NAME!r}")
-    if f"Version: {EXPECTED_VERSION}" not in meta:
-        fail(f"wheel Version not {EXPECTED_VERSION!r}")
+    if f"Version: {EXPECTED_PY_VERSION}" not in meta:
+        fail(f"wheel Version not {EXPECTED_PY_VERSION!r}")
     if EXPECTED_CORE_DEP not in meta:
         fail(f"wheel missing Requires-Dist {EXPECTED_CORE_DEP!r}")
     # No path source or old inter-agent dependency leaked into built metadata.
@@ -176,8 +180,8 @@ def validate_sdist(sdist: Path) -> None:
         body = tar.extractfile(pkginfo).read().decode("utf-8") if pkginfo else ""  # type: ignore[arg-type]
     if f"Name: {EXPECTED_PY_NAME}" not in body:
         fail(f"sdist Name not {EXPECTED_PY_NAME!r}")
-    if f"Version: {EXPECTED_VERSION}" not in body:
-        fail(f"sdist Version not {EXPECTED_VERSION!r}")
+    if f"Version: {EXPECTED_PY_VERSION}" not in body:
+        fail(f"sdist Version not {EXPECTED_PY_VERSION!r}")
     if not any(n.endswith("inter_agent_pi/__init__.py") for n in names):
         fail("sdist has no inter_agent_pi source")
     for n in names:

@@ -1,5 +1,9 @@
 # @arcanemachine/inter-agent-pi
 
+<p align="center">
+  <img src="https://raw.githubusercontent.com/arcanemachine/inter-agent-pi/main/logo.png" alt="inter-agent Pi logo" width="250" />
+</p>
+
 [![Pi](https://img.shields.io/badge/pi-extension-purple)](https://github.com/arcanemachine/inter-agent-pi)
 
 The Pi extension for the inter-agent message bus.
@@ -20,7 +24,7 @@ Code material.
 From a Pi session:
 
 ```bash
-pi install npm:@arcanemachine/inter-agent-pi@0.2.0
+pi install npm:@arcanemachine/inter-agent-pi
 ```
 
 Or install from a published Git tag (once published; do not pin a raw commit

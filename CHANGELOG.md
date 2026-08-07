@@ -2,14 +2,20 @@
 
 All notable changes to the `inter-agent-pi` package are recorded here.
 This repository begins with a clean one-commit history; the baseline below is
-the split-generation source extracted from the unreleased coordinated monorepo
+the split-generation source extracted from the coordinated monorepo
 `0.2.0` split generation.
+
+## 0.2.1 — npm gallery metadata
+
+- Added the Pi gallery logo and `pi.image` metadata.
+- Updated the scoped npm installation example.
+- Python helper version remains `0.2.0`.
 
 ## 0.2.0 — split-generation baseline
 
 Initial standalone repository for the Pi extension and its Python helper.
-Extracted as a clean-history child from the frozen monorepo split source; it
-is not yet published to a package registry.
+Extracted as a clean-history child from the frozen monorepo split source; the
+Python helper and npm extension releases are versioned independently.
 
 ### Added
 

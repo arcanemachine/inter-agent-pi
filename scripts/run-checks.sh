@@ -31,14 +31,14 @@ echo "== mypy =="
 uv run mypy src tests
 
 echo "== npm pack (build tarball for validation) =="
-rm -f inter-agent-pi-*.tgz
+rm -f inter-agent-pi-*.tgz arcanemachine-inter-agent-pi-*.tgz
 npm pack
 
 echo "== python build =="
 rm -rf dist && uv build
 
 echo "== artifact validation =="
-NPM_TGZ=$(ls inter-agent-pi-*.tgz)
+NPM_TGZ=$(ls arcanemachine-inter-agent-pi-*.tgz)
 WHL=$(ls dist/inter_agent_pi-*.whl)
 SDIST=$(ls dist/inter_agent_pi-0.2.0.tar.gz)
 uv run python scripts/validate-artifacts.py "$NPM_TGZ" "$WHL" "$SDIST"

@@ -1,6 +1,6 @@
 {
   "name": "@arcanemachine/inter-agent-pi",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "Pi extension for connecting to the inter-agent message bus",
   "type": "module",
   "scripts": {
@@ -29,7 +29,8 @@
   "pi": {
     "extensions": [
       "./src/index.ts"
-    ]
+    ],
+    "image": "https://raw.githubusercontent.com/arcanemachine/inter-agent-pi/main/logo.png"
   },
   "author": "Nicholas Moen",
   "license": "MIT",
