@@ -6,7 +6,7 @@
 
 [![Pi](https://img.shields.io/badge/pi-extension-purple)](https://github.com/arcanemachine/inter-agent-pi)
 
-The Pi extension for the inter-agent message bus.
+The Pi extension for the [inter-agent](https://github.com/arcanemachine/inter-agent) message bus.
 
 It connects a Pi coding-agent session to the bus as a named agent,
 exposes grouped `/inter-agent` commands and a bounded set of agent-callable
