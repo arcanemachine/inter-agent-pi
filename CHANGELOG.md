@@ -13,7 +13,7 @@ is not yet published to a package registry.
 
 ### Added
 
-- Pi extension (`inter-agent-pi` on npm/Pi) exposing grouped commands —
+- Pi extension (`@arcanemachine/inter-agent-pi` on npm/Pi) exposing grouped commands —
   `connect`, `disconnect`, `kick`, `rename`, `send`, `broadcast`, `publish`,
   `channels`, `subscribe`, `unsubscribe`, `list`, `status`, `delivery` — and
   the agent-callable tools `inter_agent_send`, `inter_agent_broadcast`,

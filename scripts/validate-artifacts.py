@@ -15,7 +15,7 @@ import tarfile
 import zipfile
 from pathlib import Path
 
-EXPECTED_NPM_NAME = "inter-agent-pi"
+EXPECTED_NPM_NAME = "@arcanemachine/inter-agent-pi"
 EXPECTED_VERSION = "0.2.0"
 EXPECTED_PY_NAME = "inter-agent-pi"
 EXPECTED_CORE_DEP = "inter-agent-core==0.2.0"

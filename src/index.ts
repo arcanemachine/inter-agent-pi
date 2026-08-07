@@ -7,7 +7,7 @@
  *
  * Installation:
  * ```bash
- * pi install npm:inter-agent-pi@0.2.0
+ * pi install npm:@arcanemachine/inter-agent-pi@0.2.0
  * ```
  *
  * Or load directly from the source checkout:

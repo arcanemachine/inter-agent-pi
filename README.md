@@ -1,4 +1,4 @@
-# inter-agent-pi
+# @arcanemachine/inter-agent-pi
 
 [![Pi](https://img.shields.io/badge/pi-extension-purple)](https://github.com/arcanemachine/inter-agent-pi)
 
@@ -20,7 +20,7 @@ Code material.
 From a Pi session:
 
 ```bash
-pi install npm:inter-agent-pi@0.2.0
+pi install npm:@arcanemachine/inter-agent-pi@0.2.0
 ```
 
 Or install from a published Git tag (once published; do not pin a raw commit
