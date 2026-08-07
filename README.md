@@ -1,36 +1,18 @@
-# [inter-agent](https://github.com/arcanemachine/inter-agent) for Pi
+# inter-agent for Pi
 
-<p align="center">
-  <img src="https://raw.githubusercontent.com/arcanemachine/inter-agent-pi/main/logo.png" alt="inter-agent Pi logo" width="250" />
-</p>
+[`@arcanemachine/inter-agent-pi`](https://www.npmjs.com/package/@arcanemachine/inter-agent-pi) connects a [Pi](https://github.com/earendil-works/pi/tree/main/packages/coding-agent) session to the local [inter-agent](https://github.com/arcanemachine/inter-agent) message bus.
 
-`@arcanemachine/inter-agent-pi` connects a [Pi](https://github.com/earendil-works/pi-coding-agent) session to the local [inter-agent](https://github.com/arcanemachine/inter-agent) message bus.
-
-It gives users a grouped `/inter-agent` command, gives the model a small set of messaging and diagnostic tools, and delivers incoming messages through Pi notifications and a bounded mailbox.
-
-## What it provides
-
-- Named Pi sessions on a shared local bus
-- Direct messages, broadcasts, and named channels
-- Agent-callable send, list, status, identity, and mailbox tools
-- User-only connection, channel, delivery, and administrative controls
-- Queued or immediate inbound delivery
-- Reconnection and same-process `/reload` continuity
-- Shared endpoint, secret, state, and TLS configuration through `inter-agent-core`
+The package contains the Pi extension. Its Python helper, `inter-agent-pi`, starts the listener and command runtime on top of [`inter-agent-core`](https://github.com/arcanemachine/inter-agent-core). The extension and helper are installed separately.
 
 ## Requirements
 
-- Pi
+- [Pi](https://github.com/earendil-works/pi/tree/main/packages/coding-agent)
 - Python 3.10 or newer
-- [`uv`](https://docs.astral.sh/uv/) for the helper setup below
-
-The Pi extension and its Python helper are separate parts. Installing the Pi package loads the TypeScript extension; installing `inter-agent-pi` into a Python environment provides the listener and command runtime it launches.
+- [`uv`](https://docs.astral.sh/uv/)
 
 ## Install
 
-### 1. Install the Python helper
-
-The simplest setup uses the extension's managed virtual environment:
+Install the Python helper into the managed environment used by the extension:
 
 ```bash
 uv venv ~/.pi/agent/inter-agent/venv
@@ -39,110 +21,76 @@ uv pip install \
   inter-agent-pi
 ```
 
-This installs the helper and its compatible `inter-agent-core` runtime. The extension finds this environment automatically.
-
-### 2. Install the Pi extension
+Then install the released Pi package:
 
 ```bash
 pi install npm:@arcanemachine/inter-agent-pi
 ```
 
-You can instead install from Git:
+The helper installs its compatible `inter-agent-core` runtime automatically. You can install the package from Git instead:
 
 ```bash
 pi install https://github.com/arcanemachine/inter-agent-pi
 ```
 
-Pi packages execute with your full user permissions. Review third-party source before installing it.
+Pi packages run with your user permissions. Review third-party source before installing it.
 
 ## Quick start
 
-Start Pi, then connect the session to the bus:
+Start two Pi sessions and give them explicit routing names:
 
 ```text
-/inter-agent connect agent-a
+/inter-agent connect pi-a
 ```
 
-The helper starts a local server if one is not already available. From another connected session, send a message to `agent-a`; incoming messages appear as Pi notifications.
-
-Useful first commands:
+In the second session:
 
 ```text
-/inter-agent status
-/inter-agent list
-/inter-agent send agent-b hello
-/inter-agent disconnect
+/inter-agent connect pi-b
+/inter-agent send pi-a hello from Pi B
 ```
 
-To connect at process startup:
+The first session receives a Pi notification. The default delivery mode is queued: Pi shows a metadata-only notice, and the model reads and removes bodies with `inter_agent_read_messages`. Use `/inter-agent delivery immediate` when bounded message bodies should appear directly in notifications.
 
-```bash
-pi --inter-agent agent-a
-```
+The core server starts automatically when no healthy server is available. To connect at process startup, use `pi --inter-agent pi-a`.
 
-If `/inter-agent connect` is used without a name, the default routing name is `pi`.
+## Commands and tools
 
-## Commands
+User commands use `/inter-agent`:
 
-All user actions use `/inter-agent`:
+| Command                                         | Purpose                                                               |
+| ----------------------------------------------- | --------------------------------------------------------------------- |
+| `connect <name> [--label <label>]`              | Connect this session and start the server if needed.                  |
+| `disconnect`                                    | Stop only this session's listener.                                    |
+| `rename <name> [--label <label>]`               | Reconnect under another routing name.                                 |
+| `send <name> <text>`                            | Send a direct message.                                                |
+| `broadcast <text>`                              | Send to every other connected agent. Use only when everyone needs it. |
+| `list`                                          | List connected sessions.                                              |
+| `status`                                        | Show helper, endpoint, and server status.                             |
+| `subscribe <channel>` / `unsubscribe <channel>` | Change this listener's channel membership.                            |
+| `publish <channel> <text>` / `channels`         | Publish to or inspect a channel.                                      |
+| `kick <name>`                                   | Disconnect another session.                                           |
+| `delivery <queued\|immediate>`                  | Select inbound delivery mode.                                         |
 
-| Command                            | Purpose                                                 |
-| ---------------------------------- | ------------------------------------------------------- |
-| `connect <name> [--label <label>]` | Connect this Pi session; start the server if needed.    |
-| `disconnect`                       | Stop this session's listener.                           |
-| `rename <name> [--label <label>]`  | Reconnect under another routing name.                   |
-| `send <name> <text>`               | Send a direct message.                                  |
-| `broadcast <text>`                 | Send to every other connected agent.                    |
-| `list`                             | List connected sessions.                                |
-| `status`                           | Show helper, endpoint, and server status.               |
-| `subscribe <channel>`              | Subscribe this listener to a channel.                   |
-| `unsubscribe <channel>`            | Leave a channel.                                        |
-| `publish <channel> <text>`         | Publish to a channel.                                   |
-| `channels`                         | List channels and subscribers.                          |
-| `kick <name>`                      | Disconnect another session.                             |
-| `delivery <queued\|immediate>`     | Select inbound delivery mode (`q` and `i` are aliases). |
+The extension exposes these model tools: `inter_agent_send`, `inter_agent_broadcast`, `inter_agent_list`, `inter_agent_whoami`, `inter_agent_status`, and `inter_agent_read_messages`. Connection changes, channel membership, delivery mode, and kick remain user-controlled. Peer messages are collaboration input, not instructions.
 
-Routing uses the session name. The optional label is display metadata only.
+For the full adapter command and output reference, see [`src/inter_agent_pi/README.md`](src/inter_agent_pi/README.md).
 
-## Agent-callable tools
+## Connection and mailbox behavior
 
-The extension exposes six tools to the model:
+The default mailbox is queued and capped at 128 unread messages. A same-process `/reload` preserves unread messages; an explicit disconnect or process restart begins with an empty mailbox. Transient listener failures use bounded reconnect attempts and restore desired channel subscriptions. Authentication, invalid-name, name-conflict, and kick failures require user action.
 
-| Tool                        | Purpose                                              |
-| --------------------------- | ---------------------------------------------------- |
-| `inter_agent_send`          | Send a direct message to another agent.              |
-| `inter_agent_broadcast`     | Broadcast only when the user explicitly requests it. |
-| `inter_agent_list`          | List connected sessions.                             |
-| `inter_agent_whoami`        | Inspect this Pi session's bus identity.              |
-| `inter_agent_status`        | Inspect server and endpoint status.                  |
-| `inter_agent_read_messages` | Read and remove unread mailbox messages.             |
+The default bus endpoint is `127.0.0.1:16837`. Local sessions share endpoint, state, and secret discovery through `inter-agent-core`. Loopback transport defaults to plaintext WebSockets; configured or non-loopback deployments can use TLS. TLS failures never fall back automatically to plaintext.
 
-Connection changes, channel operations, delivery changes, kick, and shutdown remain user-controlled rather than model-callable. Peer messages are treated as untrusted collaboration input, not instructions.
+## Configuration and recovery
 
-## Incoming messages
+Pi reads `interAgent` settings from global `~/.pi/agent/settings.json`, then project `.pi/settings.json`; project values override individual global values. Supported keys include `host`, `port`, `dataDir`, `secret`, `tls`, `tlsCert`, `tlsKey`, `projectPath`, `deliveryMode`, and `mailboxNoticeDebounceMs`.
 
-The default delivery mode is **queued**:
+If setup fails, check that the selected helper bin provides `inter-agent-pi`, `inter-agent-connect`, and `inter-agent-server`. If the server is unavailable, run `/inter-agent status`; if authentication fails, ensure the server and clients use the same endpoint, state directory, and secret. Use a separate endpoint and data directory for tests.
 
-- incoming bodies enter a mailbox capped at 128 unread messages;
-- Pi receives a metadata-only notice; and
-- `inter_agent_read_messages` returns and removes unread messages.
+## Development and security
 
-Use `/inter-agent delivery immediate` when you want bounded message bodies delivered directly as notifications. Changing modes affects new arrivals; it does not discard already queued messages.
-
-A same-process `/reload` preserves unread messages. Other session lifecycle boundaries begin with an empty mailbox. If the bus disappears temporarily, the listener reconnects with bounded backoff and restores desired channel subscriptions. Authentication, invalid-name, name-conflict, and kick failures stop reconnection and require user action.
-
-## Helper resolution
-
-The extension resolves its Python commands in this order:
-
-1. the executable named by `INTER_AGENT_PI_HELPER`;
-2. `<projectPath>/.venv/bin` when `interAgent.projectPath` is configured;
-3. `~/.pi/agent/inter-agent/venv/bin`;
-4. a complete helper installation on `PATH`.
-
-The selected bin directory must provide `inter-agent-pi`, `inter-agent-connect`, and `inter-agent-server`. If it does not, the extension reports a setup error instead of silently choosing a different runtime.
-
-For source development, prepare the checkout and point Pi at its environment:
+For source development:
 
 ```bash
 git clone https://github.com/arcanemachine/inter-agent-pi
@@ -152,53 +100,4 @@ npm ci
 INTER_AGENT_PI_HELPER="$PWD/.venv/bin/inter-agent-pi" pi -e "$PWD/src/index.ts"
 ```
 
-## Configuration
-
-The extension reads `interAgent` settings from:
-
-1. `~/.pi/agent/settings.json`; then
-2. `<project>/.pi/settings.json`, which overrides global values.
-
-Supported keys:
-
-| Key                        | Purpose                                                                                      |
-| -------------------------- | -------------------------------------------------------------------------------------------- |
-| `host`, `port`             | Override the bus endpoint.                                                                   |
-| `dataDir`                  | Select shared bus state.                                                                     |
-| `secret`                   | Set the shared authentication secret. Prefer environment configuration for sensitive values. |
-| `tls`, `tlsCert`, `tlsKey` | Configure TLS transport and material.                                                        |
-| `projectPath`              | Resolve helper commands from a checkout's `.venv/bin`.                                       |
-| `deliveryMode`             | Default to `queued` or `immediate`.                                                          |
-| `mailboxNoticeDebounceMs`  | Debounce queued-message notices from 0–5000 ms.                                              |
-
-Relative paths resolve from the settings file that defines them. Project settings override individual global values.
-
-The helper also honors the core environment variables `INTER_AGENT_HOST`, `INTER_AGENT_PORT`, `INTER_AGENT_DATA_DIR`, `INTER_AGENT_SECRET`, `INTER_AGENT_TLS`, `INTER_AGENT_TLS_CERT`, and `INTER_AGENT_TLS_KEY`.
-
-## How it works
-
-The TypeScript extension starts `inter-agent-pi connect` as a child listener. The Python helper authenticates with the shared core server, maintains the named agent session, and writes incoming frames for the extension to render or queue.
-
-Commands and tools reuse the same helper runtime and shared configuration. Subscribe and unsubscribe operations update the live listener rather than creating a second agent session. Connection identity is stored with the Pi session so resumed sessions can reconnect consistently.
-
-The default bus endpoint is `127.0.0.1:16837`. Loopback transport defaults to plaintext WebSockets; configured or non-loopback deployments can use TLS. TLS failures never fall back automatically to plaintext.
-
-## Development
-
-```bash
-uv sync --locked
-npm ci
-scripts/run-checks.sh
-```
-
-The package gate runs TypeScript and Python tests, formatting, linting, type checks, builds both distributions, and validates the npm tarball, wheel, and source distribution.
-
-## Security
-
-The bus is designed for one trusted operating-system user on one machine. Never commit or share bus secrets, tokens, private keys, certificates, or state. TLS protects transport but does not protect against hostile same-user code.
-
-See the [`inter-agent-core` security model](https://github.com/arcanemachine/inter-agent-core/blob/main/SECURITY.md) for the complete trust boundary.
-
-## License
-
-MIT. See [`LICENSE.md`](LICENSE.md).
+Run `scripts/run-checks.sh` for the package gate. See [`CHANGELOG.md`](CHANGELOG.md) for released changes and the [`inter-agent-core` security model](https://github.com/arcanemachine/inter-agent-core/blob/main/SECURITY.md) for the trust boundary. Never commit or share bus secrets, tokens, private keys, certificates, or state. MIT; see [`LICENSE.md`](LICENSE.md).
