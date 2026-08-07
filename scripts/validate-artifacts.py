@@ -20,6 +20,11 @@ EXPECTED_VERSION = "0.2.0"
 EXPECTED_PY_NAME = "inter-agent-pi"
 EXPECTED_CORE_DEP = "inter-agent-core==0.2.0"
 EXPECTED_WS_DEP = "websockets==16.0"
+EXPECTED_PI_PEERS = {
+    "@earendil-works/pi-coding-agent",
+    "@earendil-works/pi-tui",
+    "typebox",
+}
 
 NPM_ALLOWED_FILES = {
     "package/package.json",
@@ -69,6 +74,24 @@ def validate_npm(tgz: Path) -> None:
         fail(f"npm version={manifest.get('version')!r} expected {EXPECTED_VERSION!r}")
     if manifest.get("private") is True:
         fail("npm package is private")
+    if manifest.get("publishConfig", {}).get("access") != "public":  # type: ignore[union-attr]
+        fail("npm publishConfig.access must be public")
+    dependencies = manifest.get("dependencies", {})
+    if not isinstance(dependencies, dict):
+        fail("npm dependencies must be an object")
+    bundled_pi_dependencies = sorted(set(dependencies) & EXPECTED_PI_PEERS)
+    if bundled_pi_dependencies:
+        fail(f"npm bundles Pi-provided dependencies: {bundled_pi_dependencies!r}")
+    peers = manifest.get("peerDependencies", {})
+    if not isinstance(peers, dict):
+        fail("npm peerDependencies must be an object")
+    if set(peers) != EXPECTED_PI_PEERS or any(value != "*" for value in peers.values()):
+        fail(f"npm peerDependencies={peers!r}; expected Pi peers at '*'")
+    peer_meta = manifest.get("peerDependenciesMeta", {})
+    if not isinstance(peer_meta, dict):
+        fail("npm peerDependenciesMeta must be an object")
+    if any(peer_meta.get(name, {}).get("optional") is not True for name in EXPECTED_PI_PEERS):  # type: ignore[union-attr]
+        fail("all Pi peer dependencies must be optional")
     if manifest.get("pi", {}).get("extensions") != ["./src/index.ts"]:  # type: ignore[union-attr]
         fail(f"npm pi.extensions={manifest.get('pi', {}).get('extensions')!r}")  # type: ignore[union-attr]
     files = set(manifest.get("files", []))  # type: ignore[union-attr]
@@ -116,7 +139,12 @@ def validate_wheel(whl: Path) -> None:
     if EXPECTED_CORE_DEP not in meta:
         fail(f"wheel missing Requires-Dist {EXPECTED_CORE_DEP!r}")
     # No path source or old inter-agent dependency leaked into built metadata.
-    for bad in ("file://", "../../tmp", "Requires-Dist: inter-agent ==", "Requires-Dist: inter-agent=="):
+    for bad in (
+        "file://",
+        "../../tmp",
+        "Requires-Dist: inter-agent ==",
+        "Requires-Dist: inter-agent==",
+    ):
         if bad in meta:
             fail(f"wheel metadata contains forbidden string {bad!r}")
 
@@ -144,9 +172,7 @@ def validate_sdist(sdist: Path) -> None:
     print(f"== python sdist: {sdist.name} ==")
     with tarfile.open(sdist, "r:gz") as tar:
         names = [m.name for m in tar.getmembers() if m.isfile()]
-        pkginfo = next(
-            (m for m in tar.getmembers() if m.name.endswith("PKG-INFO")), None
-        )
+        pkginfo = next((m for m in tar.getmembers() if m.name.endswith("PKG-INFO")), None)
         body = tar.extractfile(pkginfo).read().decode("utf-8") if pkginfo else ""  # type: ignore[arg-type]
     if f"Name: {EXPECTED_PY_NAME}" not in body:
         fail(f"sdist Name not {EXPECTED_PY_NAME!r}")
@@ -163,7 +189,10 @@ def validate_sdist(sdist: Path) -> None:
 
 def main(argv: list[str]) -> int:
     if len(argv) != 3:
-        print("usage: validate-artifacts.py <npm.tgz> <python.whl> <python.tar.gz>", file=sys.stderr)
+        print(
+            "usage: validate-artifacts.py <npm.tgz> <python.whl> <python.tar.gz>",
+            file=sys.stderr,
+        )
         return 2
     npm_tgz, whl, sdist = (Path(p) for p in argv)
     for p in (npm_tgz, whl, sdist):

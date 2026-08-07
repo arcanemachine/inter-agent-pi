@@ -544,17 +544,23 @@ def test_pi_extension_reports_runtime_setup_guidance() -> None:
     assert "scripts.unavailableMessage" in content
 
 
-def test_bundled_pi_package_declares_runtime_dependencies() -> None:
+def test_pi_package_declares_pi_runtime_peers() -> None:
     manifest = json.loads(PI_PACKAGE.read_text(encoding="utf-8"))
 
     assert manifest["name"] == "inter-agent-pi"
     assert manifest.get("private") is not True
     assert "pi-package" in manifest["keywords"]
     assert manifest["pi"]["extensions"] == ["./src/index.ts"]
-    assert manifest["dependencies"]["typebox"] == "^1.1.38"
-    assert "typebox" not in manifest["devDependencies"]
-    assert "@earendil-works/pi-coding-agent" in manifest["peerDependencies"]
-    assert "@earendil-works/pi-tui" in manifest["peerDependencies"]
+    assert "typebox" not in manifest.get("dependencies", {})
+    assert manifest["devDependencies"]["typebox"] == "1.1.38"
+    expected_peers = {
+        "@earendil-works/pi-coding-agent": "*",
+        "@earendil-works/pi-tui": "*",
+        "typebox": "*",
+    }
+    assert manifest["peerDependencies"] == expected_peers
+    assert all(manifest["peerDependenciesMeta"][name]["optional"] for name in expected_peers)
+    assert manifest["publishConfig"]["access"] == "public"
     files = manifest["files"]
     assert files == ["src/index.ts", "src/mailbox.ts", "README.md", "CHANGELOG.md", "LICENSE.md"]
     assert "LICENSE" not in files
