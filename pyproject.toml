@@ -34,11 +34,6 @@ dev = [
   "mypy==1.20.2",
 ]
 
-[tool.uv.sources]
-# Prepublication resolution against the permanent core root. Extension release
-# work removes this source and re-locks against the published core package.
-inter-agent-core = { git = "https://github.com/arcanemachine/inter-agent-core.git", rev = "21b9e70da8a01c5345df4ca9680ad7eff0c81072" }
-
 [tool.setuptools.packages.find]
 where = ["src"]
 

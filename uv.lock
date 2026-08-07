@@ -279,10 +279,14 @@ wheels = [
 [[package]]
 name = "inter-agent-core"
 version = "0.2.0"
-source = { git = "https://github.com/arcanemachine/inter-agent-core.git?rev=21b9e70da8a01c5345df4ca9680ad7eff0c81072#21b9e70da8a01c5345df4ca9680ad7eff0c81072" }
+source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "cryptography" },
     { name = "websockets" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/6c/f6/ff9338addfa6efe70341269b27d6e1a28128f39a3a1a4d784aeabdb0cda9/inter_agent_core-0.2.0.tar.gz", hash = "sha256:4e415c921f1c4c5e4116e1920355d3862599a46ed576d2e91d2966d20fd46ddd", size = 40445, upload-time = "2026-08-06T22:16:50.106Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/49/5f/876bba629a6e52afefee39f4463f09323f318cb1a23799ee79ba0b3f1c23/inter_agent_core-0.2.0-py3-none-any.whl", hash = "sha256:9bb957fc4b831795f4b8947d3a0c6c1ba0359c9557dabfa9a89daf41a6afb5c0", size = 67022, upload-time = "2026-08-06T22:16:48.722Z" },
 ]
 
 [[package]]
@@ -305,7 +309,7 @@ dev = [
 
 [package.metadata]
 requires-dist = [
-    { name = "inter-agent-core", git = "https://github.com/arcanemachine/inter-agent-core.git?rev=21b9e70da8a01c5345df4ca9680ad7eff0c81072" },
+    { name = "inter-agent-core", specifier = "==0.2.0" },
     { name = "websockets", specifier = "==16.0" },
 ]
 
