@@ -55,6 +55,11 @@ _PERMANENT_ERROR_CODES = frozenset(
     }
 )
 
+#: Bounds for custom-send diagnostics relayed through the private bridge so a
+#: misbehaving peer cannot push unbounded text into adapter output.
+_CUSTOM_ERROR_CODE_MAX = 64
+_CUSTOM_ERROR_MESSAGE_MAX = 1024
+
 log = logging.getLogger("inter-agent.pi.listener")
 
 
@@ -92,6 +97,15 @@ def _print_frame(payload: str, output: TextIO) -> None:
     """Emit a single JSON frame to stdout, flushed."""
     output.write(payload + "\n")
     output.flush()
+
+
+def _custom_error_response(code: str, message: str) -> dict[str, object]:
+    """Build a bounded bridge error response for a custom-send failure."""
+    return {
+        "op": "error",
+        "code": code[:_CUSTOM_ERROR_CODE_MAX],
+        "message": message[:_CUSTOM_ERROR_MESSAGE_MAX],
+    }
 
 
 def _start_server(
@@ -172,6 +186,23 @@ async def _connect_and_stream(
             except Exception as exc:
                 return {"op": "error", "code": "LISTENER_UNAVAILABLE", "message": str(exc)}
 
+        async def handle_custom_request(
+            custom_type: str, payload: object, to: str
+        ) -> dict[str, object]:
+            try:
+                result = await session.send_custom(custom_type, payload, to)
+            except Exception as exc:
+                return _custom_error_response("LISTENER_UNAVAILABLE", str(exc))
+            if result.error is not None:
+                return _custom_error_response(
+                    str(result.error.get("code", "CUSTOM_SEND_FAILED")),
+                    str(result.error.get("message", "custom send failed")),
+                )
+            # Minimal and intrinsically bounded: request-derived fields are
+            # never echoed, so the response fits the bridge bound for every
+            # accepted request.
+            return {"op": "custom_ok", "submitted": True}
+
         async def reapply_desired() -> None:
             for channel in sorted(desired or ()):
                 try:
@@ -190,7 +221,9 @@ async def _connect_and_stream(
             if control_path is None:
                 return
             try:
-                server = control.ControlServer(control_path, handle_request)
+                server = control.ControlServer(
+                    control_path, handle_request, custom_handler=handle_custom_request
+                )
                 started = await server.start()
                 if not started:
                     log.warning("control socket unavailable; subscribe/unsubscribe disabled")

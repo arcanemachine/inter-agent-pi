@@ -7,7 +7,9 @@ import io
 import json
 import os
 from collections.abc import AsyncIterator
+from contextlib import suppress
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from inter_agent.core import adapter_control as control
@@ -192,9 +194,18 @@ class TestRunListenerReconnect:
 class FakeSession:
     """Stand-in for AgentSession used by listener unit tests."""
 
-    def __init__(self, frames: list[str]) -> None:
+    def __init__(
+        self,
+        frames: list[str],
+        *,
+        send_result: object | None = None,
+        send_error: Exception | None = None,
+    ) -> None:
         self._frames = list(frames)
         self.subscribe_calls: list[str] = []
+        self.send_custom_calls: list[tuple[str, object, str]] = []
+        self._send_result = send_result
+        self._send_error = send_error
 
     async def __aenter__(self) -> FakeSession:
         return self
@@ -212,6 +223,33 @@ class FakeSession:
     async def subscribe(self, channel: str) -> dict[str, object]:
         self.subscribe_calls.append(channel)
         return {"op": "subscribe_ok", "channel": channel}
+
+    async def send_custom(self, custom_type: str, payload: object, to: str) -> object:
+        self.send_custom_calls.append((custom_type, payload, to))
+        if self._send_error is not None:
+            raise self._send_error
+        return self._send_result
+
+
+class BlockingFakeSession(FakeSession):
+    """FakeSession that stays connected after emitting its frames."""
+
+    def __init__(
+        self,
+        *,
+        send_result: object | None = None,
+        send_error: Exception | None = None,
+    ) -> None:
+        super().__init__(
+            [json.dumps({"op": "welcome", "assigned_name": "test"})],
+            send_result=send_result,
+            send_error=send_error,
+        )
+
+    async def _gen(self) -> AsyncIterator[str]:
+        for frame in self._frames:
+            yield frame
+        await asyncio.Event().wait()
 
 
 class TestConnectAndStream:
@@ -612,3 +650,217 @@ class TestKickedTerminal:
         # welcome + the non-terminal error frame are both printed.
         assert json.loads(printed[0])["op"] == "welcome"
         assert json.loads(printed[1])["code"] == "UNKNOWN_OP"
+
+
+class TestCustomSendBridge:
+    @pytest.mark.asyncio
+    async def test_custom_request_forwards_through_persistent_session(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path_factory: pytest.TempPathFactory,
+    ) -> None:
+        """A strict bridge custom request reaches the session's send_custom
+        and returns a bounded submitted acknowledgement without touching the
+        channel handler."""
+        monkeypatch.setenv("INTER_AGENT_DATA_DIR", str(tmp_path_factory.mktemp("d")))
+        session = BlockingFakeSession(send_result=SimpleNamespace(submitted=True, error=None))
+        monkeypatch.setattr(
+            "inter_agent_pi.listener.AgentSession",
+            lambda *args, **kwargs: session,
+        )
+        control_path = listener._control_socket_path("127.0.0.1", 12345, "test")
+        out = io.StringIO()
+        from inter_agent_pi.listener import _connect_and_stream
+
+        task = asyncio.create_task(
+            _connect_and_stream("127.0.0.1", 12345, "test", None, out, control_path=control_path)
+        )
+        try:
+            for _ in range(40):
+                if out.getvalue().strip():
+                    break
+                await asyncio.sleep(0.02)
+            assert json.loads(out.getvalue().strip())["op"] == "welcome"
+
+            response = await control.request_custom(
+                "pi",
+                "127.0.0.1",
+                12345,
+                "test",
+                listener.pi_data_dir(),
+                "x.task.v1",
+                {"text": "hi"},
+                "agent-b",
+            )
+        finally:
+            task.cancel()
+            with suppress(asyncio.CancelledError):
+                await task
+
+        assert response == {"op": "custom_ok", "submitted": True}
+        assert session.send_custom_calls == [("x.task.v1", {"text": "hi"}, "agent-b")]
+        assert session.subscribe_calls == []
+
+    @pytest.mark.asyncio
+    async def test_custom_success_response_is_bounded_at_request_cap(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path_factory: pytest.TempPathFactory,
+    ) -> None:
+        """A valid request near the 64 KiB bridge cap still returns a minimal
+        bounded custom_ok response; request-derived fields are never echoed."""
+        monkeypatch.setenv("INTER_AGENT_DATA_DIR", str(tmp_path_factory.mktemp("d")))
+        session = BlockingFakeSession(send_result=SimpleNamespace(submitted=True, error=None))
+        monkeypatch.setattr(
+            "inter_agent_pi.listener.AgentSession",
+            lambda *args, **kwargs: session,
+        )
+        control_path = listener._control_socket_path("127.0.0.1", 12345, "test")
+        out = io.StringIO()
+        from inter_agent_pi.listener import _connect_and_stream
+
+        task = asyncio.create_task(
+            _connect_and_stream("127.0.0.1", 12345, "test", None, out, control_path=control_path)
+        )
+        try:
+            for _ in range(40):
+                if out.getvalue().strip():
+                    break
+                await asyncio.sleep(0.02)
+
+            # The largest JSON request the bridge accepts (65,534 bytes, just
+            # under the 64 KiB on-wire cap including the trailing newline).
+            base = json.dumps({"op": "custom", "custom_type": "x.task.v1", "payload": {}, "to": ""})
+            to_pad = control.CONTROL_MAX_REQUEST_BYTES - 2 - len(base.encode("utf-8"))
+            to_value = "t" * to_pad
+            request = json.dumps(
+                {"op": "custom", "custom_type": "x.task.v1", "payload": {}, "to": to_value}
+            ).encode("utf-8")
+            assert len(request) == control.CONTROL_MAX_REQUEST_BYTES - 2
+
+            response = await control.request_custom(
+                "pi",
+                "127.0.0.1",
+                12345,
+                "test",
+                listener.pi_data_dir(),
+                "x.task.v1",
+                {},
+                to_value,
+            )
+        finally:
+            task.cancel()
+            with suppress(asyncio.CancelledError):
+                await task
+
+        assert response == {"op": "custom_ok", "submitted": True}
+        encoded = json.dumps(response, ensure_ascii=False).encode("utf-8")
+        assert len(encoded) <= control.CONTROL_MAX_REQUEST_BYTES
+        # No request-derived field (custom_type or the huge to) is echoed.
+        assert "x.task.v1" not in json.dumps(response)
+        assert "t" * 8 not in json.dumps(response)
+        assert session.send_custom_calls == [("x.task.v1", {}, to_value)]
+
+    @pytest.mark.asyncio
+    async def test_custom_routing_error_is_bounded_and_relayed(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path_factory: pytest.TempPathFactory,
+    ) -> None:
+        """A server routing error is relayed to the bridge with bounded text."""
+        monkeypatch.setenv("INTER_AGENT_DATA_DIR", str(tmp_path_factory.mktemp("d")))
+        long_message = "unknown target: " + "x" * 5000
+        session = BlockingFakeSession(
+            send_result=SimpleNamespace(
+                submitted=False,
+                error={
+                    "op": "error",
+                    "code": "UNKNOWN_TARGET",
+                    "message": long_message,
+                },
+            )
+        )
+        monkeypatch.setattr(
+            "inter_agent_pi.listener.AgentSession",
+            lambda *args, **kwargs: session,
+        )
+        control_path = listener._control_socket_path("127.0.0.1", 12345, "test")
+        out = io.StringIO()
+        from inter_agent_pi.listener import _connect_and_stream
+
+        task = asyncio.create_task(
+            _connect_and_stream("127.0.0.1", 12345, "test", None, out, control_path=control_path)
+        )
+        try:
+            for _ in range(40):
+                if out.getvalue().strip():
+                    break
+                await asyncio.sleep(0.02)
+            response = await control.request_custom(
+                "pi",
+                "127.0.0.1",
+                12345,
+                "test",
+                listener.pi_data_dir(),
+                "x.task.v1",
+                {},
+                "ghost",
+            )
+        finally:
+            task.cancel()
+            with suppress(asyncio.CancelledError):
+                await task
+
+        assert response["op"] == "error"
+        assert response["code"] == "UNKNOWN_TARGET"
+        # The message is bounded at 1024 characters.
+        message = response["message"]
+        assert isinstance(message, str)
+        assert len(message) == 1024
+        assert message.endswith("x" * (1024 - len("unknown target: ")))
+
+    @pytest.mark.asyncio
+    async def test_custom_session_failure_maps_to_listener_unavailable(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path_factory: pytest.TempPathFactory,
+    ) -> None:
+        """A session-side send failure is mapped to a clean bridge error."""
+        monkeypatch.setenv("INTER_AGENT_DATA_DIR", str(tmp_path_factory.mktemp("d")))
+        session = BlockingFakeSession(send_error=RuntimeError("session closed"))
+        monkeypatch.setattr(
+            "inter_agent_pi.listener.AgentSession",
+            lambda *args, **kwargs: session,
+        )
+        control_path = listener._control_socket_path("127.0.0.1", 12345, "test")
+        out = io.StringIO()
+        from inter_agent_pi.listener import _connect_and_stream
+
+        task = asyncio.create_task(
+            _connect_and_stream("127.0.0.1", 12345, "test", None, out, control_path=control_path)
+        )
+        try:
+            for _ in range(40):
+                if out.getvalue().strip():
+                    break
+                await asyncio.sleep(0.02)
+            response = await control.request_custom(
+                "pi",
+                "127.0.0.1",
+                12345,
+                "test",
+                listener.pi_data_dir(),
+                "x.task.v1",
+                {},
+                "agent-b",
+            )
+        finally:
+            task.cancel()
+            with suppress(asyncio.CancelledError):
+                await task
+
+        assert response == {
+            "op": "error",
+            "code": "LISTENER_UNAVAILABLE",
+            "message": "session closed",
+        }

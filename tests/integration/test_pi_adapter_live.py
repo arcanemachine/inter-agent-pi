@@ -4,6 +4,7 @@ import asyncio
 import io
 import json
 import subprocess
+import sys
 from collections.abc import Callable
 from contextlib import redirect_stderr, redirect_stdout, suppress
 from dataclasses import dataclass
@@ -46,6 +47,20 @@ def run_pi_function(function: Callable[..., int], *args: object) -> CommandCaptu
     with redirect_stdout(stdout), redirect_stderr(stderr):
         code = function(*args)
     assert isinstance(code, int)
+    return CommandCapture(code=code, stdout=stdout.getvalue(), stderr=stderr.getvalue())
+
+
+def run_pi_with_stdin(args: list[str], stdin_bytes: bytes) -> CommandCapture:
+    """Run the Pi CLI in-process with a bounded stdin payload."""
+    stdout = io.StringIO()
+    stderr = io.StringIO()
+    previous = sys.stdin
+    sys.stdin = io.TextIOWrapper(io.BytesIO(stdin_bytes))
+    try:
+        with redirect_stdout(stdout), redirect_stderr(stderr):
+            code = pi_main(args)
+    finally:
+        sys.stdin = previous
     return CommandCapture(code=code, stdout=stdout.getvalue(), stderr=stderr.getvalue())
 
 
@@ -400,6 +415,106 @@ async def test_pi_subscribe_without_listener_fails_cleanly(
     assert result.stdout == ""
     assert "Traceback" not in result.stderr
     assert result.stderr.startswith("inter-agent-pi: ")
+
+
+@pytest.mark.asyncio
+async def test_pi_control_send_keeps_listener_identity_and_submits(
+    live_server: LiveServer,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path_factory: pytest.TempPathFactory,
+) -> None:
+    """control-send forwards through the listener's persistent connection and
+    the server stamps the listener's own authenticated routing name."""
+    use_short_data_dir(monkeypatch, tmp_path_factory, live_server)
+    use_live_pi_defaults(monkeypatch, live_server)
+
+    out = io.StringIO()
+    task = asyncio.create_task(
+        run_listener(live_server.host, live_server.port, "pi-agent-a", None, output=out)
+    )
+    try:
+        for _ in range(40):
+            lines = [line for line in out.getvalue().splitlines() if line.strip()]
+            if lines and json.loads(lines[-1]).get("op") == "welcome":
+                break
+            await asyncio.sleep(0.05)
+
+        async with websockets.connect(live_server.url) as target:
+            await connect_agent(target, live_server, "b", "agent-b")
+
+            request = json.dumps(
+                {"custom_type": "x.task.v1", "payload": {"text": "hello"}, "to": "agent-b"}
+            ).encode("utf-8")
+            result = await asyncio.to_thread(
+                run_pi_with_stdin, ["control-send", "--name", "pi-agent-a"], request
+            )
+            delivered = await recv_json(target)
+    finally:
+        task.cancel()
+        with suppress(asyncio.CancelledError):
+            await task
+
+    assert result.code == 0
+    assert result.stderr == ""
+    assert json.loads(result.stdout) == {"op": "custom_ok", "submitted": True}
+    assert delivered["op"] == "msg"
+    assert delivered["custom_type"] == "x.task.v1"
+    assert delivered["payload"] == {"text": "hello"}
+    assert delivered["to"] == "agent-b"
+    # The server stamps the listener's own authenticated routing name: the
+    # bridge carries no identity and no second connection was created.
+    assert delivered["from_name"] == "pi-agent-a"
+
+
+@pytest.mark.asyncio
+async def test_pi_control_send_unknown_target_isolates_routing_error(
+    live_server: LiveServer,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path_factory: pytest.TempPathFactory,
+) -> None:
+    """A routing error is returned through the bridge and never leaks into the
+    listener's ordinary stdout frame stream."""
+    use_short_data_dir(monkeypatch, tmp_path_factory, live_server)
+    use_live_pi_defaults(monkeypatch, live_server)
+
+    out = io.StringIO()
+    task = asyncio.create_task(
+        run_listener(live_server.host, live_server.port, "pi-agent-a", None, output=out)
+    )
+    try:
+        for _ in range(40):
+            lines = [line for line in out.getvalue().splitlines() if line.strip()]
+            if lines and json.loads(lines[-1]).get("op") == "welcome":
+                break
+            await asyncio.sleep(0.05)
+
+        request = json.dumps({"custom_type": "x.task.v1", "payload": {}, "to": "ghost"}).encode(
+            "utf-8"
+        )
+        result = await asyncio.to_thread(
+            run_pi_with_stdin, ["control-send", "--name", "pi-agent-a"], request
+        )
+        await asyncio.sleep(0.1)
+    finally:
+        task.cancel()
+        with suppress(asyncio.CancelledError):
+            await task
+
+    assert result.code == 1
+    assert json.loads(result.stdout) == {
+        "op": "error",
+        "code": "UNKNOWN_TARGET",
+        "message": "unknown target: ghost",
+    }
+    assert result.stderr.splitlines() == [
+        "inter-agent-pi: (UNKNOWN_TARGET): unknown target: ghost",
+    ]
+    # The routing error was consumed by the persistent-session barrier and
+    # never leaked into the listener's ordinary stdout frame stream.
+    leaked = [json.loads(line) for line in out.getvalue().splitlines() if line.strip()]
+    assert not any(
+        entry.get("op") == "error" and entry.get("code") == "UNKNOWN_TARGET" for entry in leaked
+    )
 
 
 @pytest.mark.asyncio

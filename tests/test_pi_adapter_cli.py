@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import io
 import json
+import sys
 from pathlib import Path
 
 import inter_agent.core.adapter_control as control
@@ -692,3 +694,278 @@ def test_kick_does_not_require_listener(
 
     assert commands.kick("x") == 0
     assert json.loads(capsys.readouterr().out)["op"] == "kick_ok"
+
+
+class TestControlSend:
+    @staticmethod
+    def _feed_stdin(monkeypatch: pytest.MonkeyPatch, payload: bytes) -> None:
+        monkeypatch.setattr(sys, "stdin", io.TextIOWrapper(io.BytesIO(payload)))
+
+    def test_control_send_reads_request_from_stdin_and_forwards(
+        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """The helper reads one JSON request from stdin (never argv) and
+        forwards it to the named listener's bridge, printing the bounded
+        response to stdout."""
+        calls: list[tuple[str, str, int, str, str, str, object, str]] = []
+
+        async def fake_request_custom(
+            adapter: str,
+            host: str,
+            port: int,
+            name: str,
+            base_dir: object,
+            custom_type: str,
+            payload: object,
+            to: str,
+        ) -> dict[str, object]:
+            calls.append((adapter, host, port, name, str(base_dir), custom_type, payload, to))
+            return {"op": "custom_ok", "submitted": True}
+
+        monkeypatch.setattr(control, "request_custom", fake_request_custom)
+        self._feed_stdin(
+            monkeypatch,
+            json.dumps(
+                {"custom_type": "x.task.v1", "payload": {"text": "hello"}, "to": "agent-b"}
+            ).encode("utf-8"),
+        )
+
+        code = main(["control-send", "--name", "agent-a"])
+
+        assert code == 0
+        assert calls == [
+            (
+                "pi",
+                "127.0.0.1",
+                16837,
+                "agent-a",
+                str(listener.pi_data_dir()),
+                "x.task.v1",
+                {"text": "hello"},
+                "agent-b",
+            )
+        ]
+        captured = capsys.readouterr()
+        assert json.loads(captured.out) == {"op": "custom_ok", "submitted": True}
+        assert captured.err == ""
+
+    def test_control_send_near_cap_stdin_returns_bounded_response(
+        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """A valid near-cap stdin request is parsed whole and the relayed
+        response stays well within the bridge bound."""
+        to_value = "t" * 65470
+        stdin_payload = json.dumps(
+            {"custom_type": "x.task.v1", "payload": {}, "to": to_value}
+        ).encode("utf-8")
+        assert len(stdin_payload) < control.CONTROL_MAX_REQUEST_BYTES
+
+        calls: list[tuple[object, ...]] = []
+
+        async def fake_request_custom(*args: object, **kwargs: object) -> dict[str, object]:
+            calls.append(args)
+            return {"op": "custom_ok", "submitted": True}
+
+        monkeypatch.setattr(control, "request_custom", fake_request_custom)
+        self._feed_stdin(monkeypatch, stdin_payload)
+
+        code = main(["control-send", "--name", "agent-a"])
+
+        assert code == 0
+        captured = capsys.readouterr()
+        assert json.loads(captured.out) == {"op": "custom_ok", "submitted": True}
+        assert len(captured.out.encode("utf-8")) <= control.CONTROL_MAX_REQUEST_BYTES
+        # The full to value reached the bridge; nothing was truncated.
+        assert calls and calls[0][-1] == to_value
+
+    def test_control_send_accepts_surrounding_whitespace(
+        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """Ordinary JSON surrounding whitespace is accepted; one-object and
+        validation rules still apply."""
+        calls: list[tuple[object, ...]] = []
+
+        async def fake_request_custom(*args: object, **kwargs: object) -> dict[str, object]:
+            calls.append(args)
+            return {"op": "custom_ok", "submitted": True}
+
+        monkeypatch.setattr(control, "request_custom", fake_request_custom)
+        self._feed_stdin(
+            monkeypatch,
+            b' \n\t{"custom_type": "x.task.v1", "payload": {}, "to": "agent-b"} \n ',
+        )
+
+        code = main(["control-send", "--name", "agent-a"])
+
+        assert code == 0
+        assert json.loads(capsys.readouterr().out) == {"op": "custom_ok", "submitted": True}
+        assert calls
+        custom_type, payload, to = calls[0][5:8]
+        assert custom_type == "x.task.v1"
+        assert payload == {}
+        assert to == "agent-b"
+
+    def test_control_send_relays_protocol_error(
+        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """A protocol routing error response is relayed to stdout with a clean
+        stderr diagnostic."""
+
+        async def fake_request_custom(*args: object, **kwargs: object) -> dict[str, object]:
+            return {"op": "error", "code": "UNKNOWN_TARGET", "message": "unknown target: ghost"}
+
+        monkeypatch.setattr(control, "request_custom", fake_request_custom)
+        self._feed_stdin(
+            monkeypatch,
+            json.dumps({"custom_type": "x.task.v1", "payload": {}, "to": "ghost"}).encode(),
+        )
+
+        code = main(["control-send", "--name", "agent-a"])
+
+        assert code == 1
+        captured = capsys.readouterr()
+        assert json.loads(captured.out) == {
+            "op": "error",
+            "code": "UNKNOWN_TARGET",
+            "message": "unknown target: ghost",
+        }
+        assert captured.err.splitlines() == [
+            "inter-agent-pi: (UNKNOWN_TARGET): unknown target: ghost",
+        ]
+
+    def test_control_send_missing_listener_is_clean(
+        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """A local bridge failure is adapter-prefixed and traceback-free."""
+
+        async def fake_request_custom(*args: object, **kwargs: object) -> dict[str, object]:
+            raise control.ControlError("not connected; start the listener first")
+
+        monkeypatch.setattr(control, "request_custom", fake_request_custom)
+        self._feed_stdin(
+            monkeypatch,
+            json.dumps({"custom_type": "x.task.v1", "payload": {}, "to": "agent-b"}).encode(),
+        )
+
+        code = main(["control-send", "--name", "agent-a"])
+
+        assert code == 1
+        captured = capsys.readouterr()
+        assert captured.out == ""
+        assert "Traceback" not in captured.err
+        assert captured.err.startswith("inter-agent-pi: ")
+        assert "not connected" in captured.err
+
+    def test_control_send_rejects_oversized_stdin(
+        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """An oversized stdin request is rejected before any bridge contact."""
+        called: list[bool] = []
+
+        async def fake_request_custom(*args: object, **kwargs: object) -> dict[str, object]:
+            called.append(True)
+            return {"op": "custom_ok"}
+
+        monkeypatch.setattr(control, "request_custom", fake_request_custom)
+        self._feed_stdin(monkeypatch, b"x" * (64 * 1024 + 1024))
+
+        code = main(["control-send", "--name", "agent-a"])
+
+        assert code == 1
+        captured = capsys.readouterr()
+        assert captured.out == ""
+        assert "too large" in captured.err
+        assert called == []
+
+    @pytest.mark.parametrize(
+        ("stdin_bytes", "expected_fragment"),
+        [
+            (b"not json", "not valid JSON"),
+            (b"[1, 2]", "must be a JSON object"),
+            (b'{"a": 1}{"b": 2}', "single JSON object"),
+            (
+                b'{"custom_type": "x.task.v1", "to": "agent-b"}',
+                "contain only custom_type, payload, and to",
+            ),
+            (
+                b'{"custom_type": "x.task.v1", "payload": {}, "to": "agent-b", "extra": 1}',
+                "contain only custom_type, payload, and to",
+            ),
+            (
+                b'{"custom_type": 5, "payload": {}, "to": "agent-b"}',
+                "custom_type must be a non-empty string",
+            ),
+            (
+                b'{"custom_type": "", "payload": {}, "to": "agent-b"}',
+                "custom_type must be a non-empty string",
+            ),
+            (
+                b'{"custom_type": "x.task.v1", "payload": {}, "to": ""}',
+                "to must be a non-empty string",
+            ),
+        ],
+    )
+    def test_control_send_rejects_malformed_stdin_before_bridge(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+        stdin_bytes: bytes,
+        expected_fragment: str,
+    ) -> None:
+        """Malformed stdin is rejected locally; the bridge is never contacted."""
+        called: list[bool] = []
+
+        async def fake_request_custom(*args: object, **kwargs: object) -> dict[str, object]:
+            called.append(True)
+            return {"op": "custom_ok"}
+
+        monkeypatch.setattr(control, "request_custom", fake_request_custom)
+        self._feed_stdin(monkeypatch, stdin_bytes)
+
+        code = main(["control-send", "--name", "agent-a"])
+
+        assert code == 1
+        captured = capsys.readouterr()
+        assert captured.out == ""
+        assert expected_fragment in captured.err
+        assert "Traceback" not in captured.err
+        assert called == []
+
+    def test_control_send_config_failure_is_adapter_prefixed_and_traceback_free(
+        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """resolve_endpoint config failures stay adapter-prefixed and clean."""
+        monkeypatch.setenv("INTER_AGENT_PORT", "not-an-int")
+
+        async def fake_request_custom(*args: object, **kwargs: object) -> dict[str, object]:
+            raise AssertionError("request_custom must not be called for a config failure")
+
+        monkeypatch.setattr(control, "request_custom", fake_request_custom)
+        self._feed_stdin(
+            monkeypatch,
+            json.dumps({"custom_type": "x.task.v1", "payload": {}, "to": "agent-b"}).encode(),
+        )
+
+        code = main(["control-send", "--name", "agent-a"])
+
+        assert code == 1
+        captured = capsys.readouterr()
+        assert captured.out == ""
+        assert "Traceback" not in captured.err
+        assert captured.err.startswith("inter-agent-pi: ")
+        assert "INTER_AGENT_PORT" in captured.err
+
+    def test_control_send_requires_name_flag(
+        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        async def fake_request_custom(*args: object, **kwargs: object) -> dict[str, object]:
+            raise AssertionError("request_custom must not be called without --name")
+
+        monkeypatch.setattr(control, "request_custom", fake_request_custom)
+        self._feed_stdin(
+            monkeypatch,
+            json.dumps({"custom_type": "x.task.v1", "payload": {}, "to": "agent-b"}).encode(),
+        )
+
+        with pytest.raises(SystemExit):
+            main(["control-send"])

@@ -193,6 +193,107 @@ def unsubscribe(channel: str, name: str) -> int:
     return _control_response_code(response)
 
 
+#: Exactly the keys the internal control-send request accepts from stdin.
+_CONTROL_REQUEST_KEYS = frozenset({"custom_type", "payload", "to"})
+
+#: One extra byte lets the bounded read detect an oversized request.
+_STDIN_READ_LIMIT_BYTES = control.CONTROL_MAX_REQUEST_BYTES + 1
+
+
+class _ControlSendError(Exception):
+    """Local control-send failure with a clean, bounded user-facing message."""
+
+
+def _read_control_request() -> tuple[str, object, str]:
+    """Read exactly one bounded JSON control-send request from stdin.
+
+    The request must be a single JSON object whose keys are exactly
+    ``custom_type``, ``payload``, and ``to``; anything else is rejected
+    locally so payloads and prompt/control text never appear in argv and
+    nothing malformed reaches the bridge.
+    """
+    stdin = sys.stdin
+    buffer = getattr(stdin, "buffer", None)
+    if buffer is not None:
+        raw_bytes: bytes = buffer.read(_STDIN_READ_LIMIT_BYTES)
+    else:
+        raw_text = stdin.read(_STDIN_READ_LIMIT_BYTES)
+        raw_bytes = raw_text.encode("utf-8")
+    if len(raw_bytes) > control.CONTROL_MAX_REQUEST_BYTES:
+        raise _ControlSendError("control request too large (max 64 KiB)")
+    try:
+        text: str = raw_bytes.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise _ControlSendError("control request is not valid UTF-8") from exc
+    try:
+        # raw_decode does not skip leading whitespace; index past it so
+        # ordinary surrounding whitespace is accepted.
+        start = len(text) - len(text.lstrip())
+        value, end = json.JSONDecoder().raw_decode(text, start)
+    except json.JSONDecodeError as exc:
+        raise _ControlSendError("control request is not valid JSON") from exc
+    if text[end:].strip():
+        raise _ControlSendError("control request must be a single JSON object")
+    if not isinstance(value, dict):
+        raise _ControlSendError("control request must be a JSON object")
+    if set(value.keys()) != _CONTROL_REQUEST_KEYS:
+        raise _ControlSendError("control request must contain only custom_type, payload, and to")
+    custom_type: object = value["custom_type"]
+    to: object = value["to"]
+    if not isinstance(custom_type, str) or not custom_type:
+        raise _ControlSendError("custom_type must be a non-empty string")
+    if not isinstance(to, str) or not to:
+        raise _ControlSendError("to must be a non-empty string")
+    return custom_type, value["payload"], to
+
+
+def control_send(name: str) -> int:
+    """Send one targeted custom message through the named live listener.
+
+    Internal helper for the Pi extension. Reads exactly one bounded JSON
+    request object from stdin (``custom_type``, ``payload``, ``to``), forwards
+    it through the listener's persistent authenticated agent connection via the
+    private bridge, and prints the bounded bridge response to stdout. Payloads
+    and prompt/control text never appear in argv. Clean local diagnostics go to
+    stderr; the exit code is 0 only for a ``custom_ok`` response.
+    """
+    try:
+        custom_type, payload, to = _read_control_request()
+        endpoint = resolve_endpoint(allow_discovery=True)
+        response = asyncio.run(
+            control.request_custom(
+                "pi",
+                endpoint.host,
+                endpoint.port,
+                name,
+                listener.pi_data_dir(),
+                custom_type,
+                payload,
+                to,
+            )
+        )
+    except _ControlSendError as exc:
+        print(f"inter-agent-pi: {exc}", file=sys.stderr)
+        return 1
+    except (
+        SystemExit,
+        control.ControlError,
+        OSError,
+        TimeoutError,
+        ValueError,
+        WebSocketException,
+    ) as exc:
+        print(f"inter-agent-pi: {exc}", file=sys.stderr)
+        return 1
+    print(json.dumps(response, ensure_ascii=False))
+    if response.get("op") == "custom_ok":
+        return 0
+    code = response.get("code", "PROTOCOL_ERROR")
+    message = response.get("message", "protocol error")
+    print(f"inter-agent-pi: ({code}): {message}", file=sys.stderr)
+    return 1
+
+
 def publish(channel: str, text: str, from_name: str | None = None) -> int:
     if not _validate_channel_or_error(channel):
         return 1
