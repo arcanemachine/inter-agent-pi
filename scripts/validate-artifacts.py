@@ -31,6 +31,7 @@ EXPECTED_PI_PEERS = {
 NPM_ALLOWED_FILES = {
     "package/package.json",
     "package/src/index.ts",
+    "package/src/control.ts",
     "package/src/mailbox.ts",
     "package/README.md",
     "package/CHANGELOG.md",
@@ -99,7 +100,7 @@ def validate_npm(tgz: Path) -> None:
     if manifest.get("pi", {}).get("image") != EXPECTED_PI_IMAGE:  # type: ignore[union-attr]
         fail(f"npm pi.image={manifest.get('pi', {}).get('image')!r}")  # type: ignore[union-attr]
     files = set(manifest.get("files", []))  # type: ignore[union-attr]
-    if files != {"src/index.ts", "src/mailbox.ts", "README.md", "CHANGELOG.md", "LICENSE.md"}:
+    if files != {"src/index.ts", "src/control.ts", "src/mailbox.ts", "README.md", "CHANGELOG.md", "LICENSE.md"}:
         fail(f"npm files allowlist={sorted(files)!r}")
 
     shipped = set(names)

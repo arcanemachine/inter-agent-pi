@@ -38,6 +38,7 @@ export const CONTROL_COMMAND_MAX = 128;
 export const CONTROL_ERROR_CODE_MAX = 64;
 export const CONTROL_DEDUP_PER_SENDER = 256;
 export const CONTROL_RESPONSE_QUEUE_MAX = 256;
+export const CONTROL_ABORT_REQUESTS_MAX = 256;
 
 /** Safe identifier alphabet for request/response ids (UUIDs are the normal form). */
 const CONTROL_ID_RE = /^[A-Za-z0-9._:-]{1,128}$/;
@@ -410,6 +411,13 @@ export function parseControlResponsePayload(
     }
     parsedError = { code: error.code, message: error.message };
   }
+  const phaseRequiresError = phase === "rejected" || phase === "failed";
+  if (phaseRequiresError !== (parsedError !== null)) {
+    return {
+      ok: false,
+      message: "control response phase and error do not agree",
+    };
+  }
   return {
     ok: true,
     response: {
@@ -537,6 +545,10 @@ interface AbortRecord {
   sequence: number;
 }
 
+interface StandaloneAbortOperation {
+  requests: AbortRecord[];
+}
+
 interface ActiveOperation {
   id: string;
   command: ControlCommand;
@@ -549,7 +561,8 @@ interface ActiveOperation {
   admitted: boolean;
   /** Set when agent_settled arrives before admission resolves. */
   settledPending: boolean;
-  aborted: boolean;
+  /** Prevent duplicate abort calls when admission was initially pending. */
+  abortApplied: boolean;
   interleaved: boolean;
   candidateFinal: unknown;
   abortRequests: AbortRecord[];
@@ -571,6 +584,7 @@ export class ControlEngine {
   private allowlist: Set<string> = new Set();
   private shuttingDown = false;
   private active: ActiveOperation | null = null;
+  private standaloneAbort: StandaloneAbortOperation | null = null;
   private dedup = new Map<string, Map<string, DedupRecord>>();
   private responseQueue: QueuedResponse[] = [];
   /** Bumped on cleanup so late async submission callbacks cannot requeue. */
@@ -618,6 +632,7 @@ export class ControlEngine {
     this.generation += 1;
     this.shuttingDown = false;
     this.active = null;
+    this.standaloneAbort = null;
     this.dedup.clear();
     this.responseQueue = [];
     if (allowControlBy === undefined || allowControlBy === null) {
@@ -836,7 +851,7 @@ export class ControlEngine {
       admissionPending: true,
       admitted: false,
       settledPending: false,
-      aborted: false,
+      abortApplied: false,
       interleaved: false,
       candidateFinal: null,
       abortRequests: [],
@@ -874,7 +889,16 @@ export class ControlEngine {
       ),
       true,
     );
-    if (operation.settledPending) this.finishAfterDeferredSettlement(operation);
+    if (operation.abortRequests.length > 0 && !operation.abortApplied) {
+      operation.abortApplied = true;
+      this.host.abort();
+    }
+    if (
+      operation.settledPending ||
+      (operation.abortApplied && this.isFullyIdle())
+    ) {
+      this.finishAfterDeferredSettlement(operation);
+    }
   }
 
   private onSubmissionRejected(
@@ -933,13 +957,95 @@ export class ControlEngine {
       );
       return;
     }
-    this.sendResponse(
-      fromName,
-      this.buildResponse(request.id, "abort", "accepted", 0, {}, null),
-      true,
-    );
-    if (this.active === null) {
-      // Idle: a successful no-op with no agent turn.
+    const record: AbortRecord = {
+      id: request.id,
+      controller: fromName,
+      sequence: 2,
+    };
+
+    if (this.active !== null) {
+      if (this.active.abortRequests.some((abort) => abort.id === request.id)) {
+        const record = this.lookupRecord(fromName, request.id);
+        if (record) this.replayRecord(fromName, record);
+        return;
+      }
+      if (this.active.abortRequests.length >= CONTROL_ABORT_REQUESTS_MAX) {
+        this.emitRejection(
+          fromName,
+          request.id,
+          request.command,
+          "busy",
+          "too many abort requests are already pending",
+        );
+        return;
+      }
+      this.active.abortRequests.push(record);
+      this.sendResponse(
+        fromName,
+        this.buildResponse(request.id, "abort", "accepted", 0, {}, null),
+        true,
+      );
+      this.sendResponse(
+        fromName,
+        this.buildResponse(request.id, "abort", "started", 1, {}, null),
+        true,
+      );
+      // Admission must win the race: a pending submitUserMessage can still be
+      // rejected or reserved, so apply abort only after it has resolved.
+      if (!this.active.admissionPending && !this.active.abortApplied) {
+        this.active.abortApplied = true;
+        this.host.abort();
+      }
+      const operation = this.active;
+      if (operation !== null && operation.abortApplied && this.isFullyIdle()) {
+        this.finalizeAbortPair();
+      }
+      return;
+    }
+
+    if (this.standaloneAbort !== null) {
+      if (
+        this.standaloneAbort.requests.some((abort) => abort.id === request.id)
+      ) {
+        const record = this.lookupRecord(fromName, request.id);
+        if (record) this.replayRecord(fromName, record);
+        return;
+      }
+      if (this.standaloneAbort.requests.length >= CONTROL_ABORT_REQUESTS_MAX) {
+        this.emitRejection(
+          fromName,
+          request.id,
+          request.command,
+          "busy",
+          "too many abort requests are already pending",
+        );
+        return;
+      }
+      this.standaloneAbort.requests.push(record);
+      this.sendResponse(
+        fromName,
+        this.buildResponse(request.id, "abort", "accepted", 0, {}, null),
+        true,
+      );
+      this.sendResponse(
+        fromName,
+        this.buildResponse(request.id, "abort", "started", 1, {}, null),
+        true,
+      );
+      this.host.abort();
+      if (this.isFullyIdle()) this.finalizeStandaloneAbort();
+      return;
+    }
+
+    if (this.isFullyIdle()) {
+      // Fully idle aborts are successful no-ops. A non-idle host with no
+      // remote operation is human-initiated work and follows the same
+      // settlement authority as a remote run.
+      this.sendResponse(
+        fromName,
+        this.buildResponse(request.id, "abort", "accepted", 0, {}, null),
+        true,
+      );
       this.sendResponse(
         fromName,
         this.buildResponse(request.id, "abort", "settled", 1, {}, null),
@@ -947,27 +1053,28 @@ export class ControlEngine {
       );
       return;
     }
-    this.active.abortRequests.push({
-      id: request.id,
-      controller: fromName,
-      sequence: 2,
-    });
+
+    this.standaloneAbort = { requests: [record] };
+    this.sendResponse(
+      fromName,
+      this.buildResponse(request.id, "abort", "accepted", 0, {}, null),
+      true,
+    );
     this.sendResponse(
       fromName,
       this.buildResponse(request.id, "abort", "started", 1, {}, null),
       true,
     );
     this.host.abort();
-    // If nothing is running or queued, there will be no agent_settled to
-    // finalize the pair, so settle both immediately.
-    if (
-      !this.active.admissionPending &&
+    if (this.isFullyIdle()) this.finalizeStandaloneAbort();
+  }
+
+  private isFullyIdle(): boolean {
+    return (
       this.host.isIdle() &&
       !this.host.hasPendingMessages() &&
       !this.host.isStreaming()
-    ) {
-      this.finalizeAbortPair();
-    }
+    );
   }
 
   private dispatchState(fromName: string, request: ControlRequest): void {
@@ -1072,6 +1179,10 @@ export class ControlEngine {
 
   /** The single terminal settle point: `agent_settled` after retries/compaction/queued continuations. */
   onAgentSettled(): void {
+    if (this.standaloneAbort !== null) {
+      this.finalizeStandaloneAbort();
+      return;
+    }
     const op = this.active;
     if (!op) return;
     if (op.admissionPending) {
@@ -1080,7 +1191,7 @@ export class ControlEngine {
       op.settledPending = true;
       return;
     }
-    if (op.abortRequests.length > 0 || op.aborted) {
+    if (op.abortRequests.length > 0) {
       this.finalizeAbortPair();
       return;
     }
@@ -1145,6 +1256,26 @@ export class ControlEngine {
       );
     }
     this.clearActive();
+  }
+
+  private finalizeStandaloneAbort(): void {
+    const standalone = this.standaloneAbort;
+    if (!standalone) return;
+    this.standaloneAbort = null;
+    for (const abort of standalone.requests) {
+      this.sendResponse(
+        abort.controller,
+        this.buildResponse(
+          abort.id,
+          "abort",
+          "settled",
+          abort.sequence++,
+          { aborted: true },
+          null,
+        ),
+        true,
+      );
+    }
   }
 
   private finalizeAbortPair(): void {
@@ -1244,6 +1375,7 @@ export class ControlEngine {
     const lifecycle = this.shuttingDown
       ? "shutting_down"
       : this.active !== null ||
+          this.standaloneAbort !== null ||
           !this.host.isIdle() ||
           this.host.hasPendingMessages()
         ? "busy"
@@ -1262,7 +1394,13 @@ export class ControlEngine {
               command: this.active.command,
               controller: this.active.controller,
             }
-          : null,
+          : this.standaloneAbort?.requests[0]
+            ? {
+                id: this.standaloneAbort.requests[0].id,
+                command: "abort",
+                controller: this.standaloneAbort.requests[0].controller,
+              }
+            : null,
     };
     return data;
   }
@@ -1375,9 +1513,27 @@ export class ControlEngine {
     // never requeue into the cleared queue.
     this.generation += 1;
     const op = this.active;
+    const standalone = this.standaloneAbort;
+    if (standalone) {
+      for (const abort of standalone.requests) {
+        this.sendResponse(
+          abort.controller,
+          this.buildResponse(
+            abort.id,
+            "abort",
+            "failed",
+            abort.sequence++,
+            {},
+            { code, message: boundedCleanupMessage(code) },
+          ),
+          true,
+          false,
+        );
+      }
+    }
     if (op) {
       const interleaved = op.interleaved;
-      if (op.abortRequests.length > 0 || op.aborted) {
+      if (op.abortRequests.length > 0) {
         this.sendResponse(
           op.controller,
           this.buildResponse(
@@ -1423,6 +1579,7 @@ export class ControlEngine {
       }
     }
     this.active = null;
+    this.standaloneAbort = null;
     this.responseQueue = [];
     this.dedup.clear();
   }

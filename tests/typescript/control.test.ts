@@ -50,6 +50,7 @@ class FakeHost implements ControlHost {
   submitted: { controller: string; payload: ControlResponse }[] = [];
   submitFailures: string[] = [];
   submitErrors = new Map<string, Error>();
+  admissionGate: Promise<void> | null = null;
   warnings: string[] = [];
 
   isIdle(): boolean {
@@ -74,7 +75,7 @@ class FakeHost implements ControlHost {
     this.userMessages.push({ text, deliverAs });
     const error = this.submitErrors.get(text);
     if (error) return Promise.reject(error);
-    return Promise.resolve();
+    return this.admissionGate ?? Promise.resolve();
   }
   abort(): void {
     this.aborts += 1;
@@ -352,6 +353,16 @@ test("strict response parse accepts rejection error shapes and rejects invalid o
     true,
   );
   assert.equal(
+    parseControlResponsePayload(
+      responsePayload({ error: { code: "busy", message: "busy" } }),
+    ).ok,
+    false,
+  );
+  assert.equal(
+    parseControlResponsePayload(responsePayload({ phase: "failed" })).ok,
+    false,
+  );
+  assert.equal(
     parseControlResponsePayload(responsePayload({ phase: "bogus" })).ok,
     false,
   );
@@ -565,6 +576,35 @@ test("abort while idle is a successful no-op without calling abort", () => {
   assert.equal(host.aborts, 0);
 });
 
+test("human-only abort waits for settlement and appears in state", async () => {
+  const host = new FakeHost();
+  const { engine } = makeEngine(host, "leader");
+  host.idle = false;
+  send(engine, "leader", request("abort", {}, "human-abort"));
+  assert.equal(host.aborts, 1);
+  const humanAbortResponses = host.responsesFor("human-abort");
+  assert.equal(
+    humanAbortResponses[humanAbortResponses.length - 1]?.phase,
+    "started",
+  );
+  send(engine, "leader", request("state", {}, "state-abort"));
+  assert.deepEqual(
+    host.responsesFor("state-abort").slice(-1)[0]?.data.activeRequest,
+    {
+      id: "human-abort",
+      command: "abort",
+      controller: "leader",
+    },
+  );
+  engine.onAgentSettled();
+  await tick();
+  const settledHumanAbort = host.responsesFor("human-abort");
+  assert.equal(
+    settledHumanAbort[settledHumanAbort.length - 1]?.phase,
+    "settled",
+  );
+});
+
 test("abort interrupts an active op and dual-settles at agent_settled", async () => {
   const host = new FakeHost();
   const { engine } = makeEngine(host, "leader");
@@ -611,6 +651,34 @@ test("abort finalizes immediately when nothing is running after the abort", asyn
   assert.equal(host.aborts, 1);
 });
 
+test("abort during admission is applied after admission and settles the pair", async () => {
+  const host = new FakeHost();
+  let release!: () => void;
+  host.admissionGate = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  const { engine } = makeEngine(host, "leader");
+  send(engine, "leader", request("prompt", { text: "gated" }, "gated"));
+  await tick();
+  send(engine, "leader", request("abort", {}, "gated-abort"));
+  assert.equal(host.aborts, 0);
+  host.idle = false;
+  release();
+  await tick();
+  assert.equal(host.aborts, 1);
+  assert.equal(
+    host.responsesFor("gated").some((r) => r.phase === "started"),
+    true,
+  );
+  engine.onAgentSettled();
+  await tick();
+  assert.equal(
+    host.responsesFor("gated").slice(-1)[0]?.error?.code,
+    "operation_aborted",
+  );
+  assert.equal(host.responsesFor("gated-abort").slice(-1)[0]?.phase, "settled");
+});
+
 test("shutdown acknowledges, calls shutdown, and rejects later requests", () => {
   const host = new FakeHost();
   const { engine } = makeEngine(host, "leader");
@@ -647,7 +715,7 @@ test("two aborts settle both abort requests at the pair finalize", async () => {
   await tick();
   send(engine, "leader", request("abort", {}, "a1"));
   send(engine, "supervisor", request("abort", {}, "a2"));
-  assert.equal(host.aborts, 2);
+  assert.equal(host.aborts, 1);
   engine.onAgentSettled();
   await tick();
   assert.equal(
