@@ -73,6 +73,9 @@ import type {
   ReloadHandoffCarrier,
 } from "./mailbox.js";
 
+import { ControlEngine, CONTROL_CUSTOM_TYPE } from "./control.js";
+import type { ControlHost, ControlResponse } from "./control.js";
+
 // ── Configuration ───────────────────────────────────────────────────────────
 
 interface InterAgentConfig {
@@ -336,6 +339,7 @@ let listenerReady = false;
 let currentConnection: ConnectionState | null = null;
 let activeStop: Promise<boolean> | null = null;
 let mailboxController: MailboxDispatcher | null = null;
+let controlEngine: ControlEngine | null = null;
 
 // ── Helpers ─────────────────────────────────────────────────────────────────
 
@@ -884,6 +888,9 @@ async function startListener(
           currentConnection = state;
           persistState(pi, state);
           updateStatus(ctx, state);
+          // The listener re-emits `welcome` after every reconnect once the
+          // private bridge is ready, so queued control responses flush here.
+          controlEngine?.onListenerReady();
           if (options.notifyOnReady) {
             notify(
               "[inter-agent] connected",
@@ -911,6 +918,28 @@ async function startListener(
           continue;
         }
         if (msg.op === "msg") {
+          // Control and unknown custom frames are classified before ordinary
+          // mailbox processing. `pi.control.v1` frames go to the control
+          // engine; unknown custom types are dropped with a bounded warning.
+          // Neither ever becomes an ordinary mailbox entry or an empty body.
+          if (typeof msg.custom_type === "string") {
+            if (msg.custom_type === CONTROL_CUSTOM_TYPE) {
+              controlEngine?.handleInboundCustomFrame({
+                msgId: typeof msg.msg_id === "string" ? msg.msg_id : "",
+                fromName:
+                  typeof msg.from_name === "string" ? msg.from_name : "",
+                customType: msg.custom_type,
+                payload: msg.payload,
+              });
+            } else {
+              notify(
+                "[inter-agent] custom",
+                `ignored unknown custom message type ${truncate(msg.custom_type, 64)}`,
+                "warning",
+              );
+            }
+            continue;
+          }
           // Use the shared inbound parser so kind/toInfo derivation and the
           // `[from: name]` prefix handling stay consistent with the mailbox.
           // A malformed frame continues the per-line loop so a later valid
@@ -1159,6 +1188,103 @@ export default function (pi: ExtensionAPI) {
   const config = loadConfig();
   const currentScripts = () => getScripts(config);
 
+  // ── Pi control V1 engine ────────────────────────────────────────────────
+  // The target-side control engine observes Pi lifecycle events it registers
+  // itself and is driven here for startup flag, session lifecycle, listener
+  // readiness, and inbound custom-frame classification. Responses travel back
+  // through the target's own persistent agent connection via the internal
+  // `control-send` bridge helper; payloads and prompt text never appear in argv.
+  function execControlSend(
+    controller: string,
+    payload: ControlResponse,
+  ): Promise<boolean> {
+    return new Promise((resolve) => {
+      const scripts = currentScripts();
+      if (scripts.unavailableMessage || !currentConnection) {
+        resolve(false);
+        return;
+      }
+      const proc = spawnChildProcess(
+        scripts.pi,
+        ["control-send", "--name", currentConnection.name],
+        {
+          stdio: ["pipe", "pipe", "pipe"],
+          shell: false,
+          env: interAgentEnv(),
+        },
+      );
+      let stdout = "";
+      proc.stdout?.on("data", (d: Buffer) => {
+        stdout += d.toString();
+      });
+      proc.stderr?.on("data", () => {
+        // Local helper diagnostics are not user-facing control responses.
+      });
+      proc.stdin?.end(
+        JSON.stringify({
+          custom_type: CONTROL_CUSTOM_TYPE,
+          payload,
+          to: controller,
+        }) + "\n",
+      );
+      const finish = (code: number | null): void => {
+        if (code === 0) {
+          try {
+            const parsed: unknown = JSON.parse(stdout);
+            if (
+              parsed &&
+              typeof parsed === "object" &&
+              (parsed as { op?: unknown }).op === "custom_ok"
+            ) {
+              resolve(true);
+              return;
+            }
+          } catch {
+            // Fall through to false.
+          }
+        }
+        resolve(false);
+      };
+      proc.on("close", (code) => finish(code));
+      proc.on("error", () => resolve(false));
+    });
+  }
+
+  const controlHost: ControlHost = {
+    isIdle: () => currentCtx?.isIdle() ?? true,
+    hasPendingMessages: () => currentCtx?.hasPendingMessages() ?? false,
+    isStreaming: () => !(currentCtx?.isIdle() ?? true),
+    isListenerReady: () => listenerReady,
+    selfName: () => currentConnection?.name ?? null,
+    submitUserMessage: (text, deliverAs) => {
+      // Task 3A adds this public API to Pi. Keep the consumer typed against the
+      // additive surface while allowing the older local dev package to report
+      // a bounded admission failure instead of silently falling back to the
+      // untracked legacy sendUserMessage path.
+      const trackedPi = pi as ExtensionAPI & {
+        submitUserMessage?: (
+          content: string,
+          options?: { deliverAs?: "steer" | "followUp" },
+        ) => Promise<void>;
+      };
+      if (typeof trackedPi.submitUserMessage !== "function") {
+        return Promise.reject(
+          new Error("Pi does not expose submitUserMessage admission API"),
+        );
+      }
+      return trackedPi.submitUserMessage(
+        text,
+        deliverAs ? { deliverAs } : undefined,
+      );
+    },
+    abort: () => currentCtx?.abort(),
+    shutdown: () => currentCtx?.shutdown(),
+    submitControlResponse: (controller, payload) =>
+      execControlSend(controller, payload),
+    notifyWarning: (body) => notify("[inter-agent] control", body, "warning"),
+  };
+  controlEngine = new ControlEngine(pi, controlHost);
+
   // ── Mailbox state and delivery ───────────────────────────────
   const initialMode = effectiveDeliveryMode(config.deliveryMode);
   const initialDebounce = effectiveDebounceMs(config.mailboxNoticeDebounceMs);
@@ -1283,10 +1409,34 @@ export default function (pi: ExtensionAPI) {
       "Set this Pi worker's inter-agent routing name at process startup",
   });
 
+  // The single comma-separated control allowlist flag. An absent flag disables
+  // control completely while leaving ordinary inter-agent messaging unchanged;
+  // an explicitly present but empty or invalid value fails closed with a
+  // bounded user-facing error. Repeated flags follow documented last-value-wins
+  // Pi behavior; the value is re-read on every session start (including reload,
+  // which carries the original flag value through the existing runtime).
+  pi.registerFlag("allow-control-by", {
+    type: "string",
+    description:
+      "Comma-separated exact routing names allowed to control this Pi worker (pi.control.v1)",
+  });
+
   // ── Session Lifecycle ─────────────────────────────────────────────────────
 
   pi.on("session_start", async (event, ctx) => {
     currentCtx = ctx;
+
+    // Re-apply the single comma-separated control allowlist flag on every
+    // session start. An absent flag disables control; an explicitly present
+    // but invalid value fails closed with a bounded user-facing error while
+    // leaving ordinary inter-agent messaging unchanged.
+    const controlSetup = controlEngine?.onSessionStart(
+      event?.reason,
+      pi.getFlag("allow-control-by"),
+    );
+    if (controlSetup && !controlSetup.ok) {
+      notify("[inter-agent] control", controlSetup.message ?? "", "error");
+    }
 
     // Same-process `/reload` preserves the bounded unread mailbox through the
     // one-use carrier; every other start reason starts empty and clears any
@@ -1382,6 +1532,10 @@ export default function (pi: ExtensionAPI) {
   });
 
   pi.on("session_shutdown", async (event, ctx) => {
+    // Fail active control work before the listener is stopped so best-effort
+    // failure responses can still reach controllers; same-process reload uses
+    // target_reloading, every other shutdown reason target_disconnected.
+    controlEngine?.onSessionShutdown(event?.reason);
     const reload = event?.reason === "reload";
     const targetCtx = currentCtx ?? ctx;
     let stopped = true;
@@ -1447,6 +1601,9 @@ export default function (pi: ExtensionAPI) {
   // continuations), flush waiting immediate bodies and at most one latest mailbox
   // notice. Never steers or aborts the run.
   pi.on("agent_settled", async () => {
+    // The control engine's single terminal settle authority fires here too;
+    // it only acts when a completion-tracked remote operation is active.
+    controlEngine?.onAgentSettled();
     mailbox.settle();
   });
 
@@ -1539,6 +1696,9 @@ export default function (pi: ExtensionAPI) {
   }
 
   async function handleDisconnect(_args: string, ctx: ExtensionContext) {
+    // Fail active control work with target_disconnected before the listener
+    // is removed so best-effort responses can still reach controllers.
+    controlEngine?.onExplicitDisconnect();
     const stopped = await stopListener(pi, ctx, { expected: true });
     if (stopped) {
       notify("[inter-agent] disconnected", "listener stopped");
@@ -1608,6 +1768,9 @@ export default function (pi: ExtensionAPI) {
     const ready = await ensureServerAvailable(currentScripts());
     if (!ready) return;
 
+    // Rename replaces the listener identity; fail active control work with
+    // target_disconnected and clear tracking before the replacement.
+    controlEngine?.onExplicitDisconnect();
     const started = await startListener(pi, ctx, config, parsed.name, label, {
       notifyOnReady: true,
     });

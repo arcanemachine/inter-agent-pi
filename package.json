@@ -8,7 +8,7 @@
     "watch": "tsc --watch",
     "typecheck": "tsc --noEmit",
     "test": "tsc -p tsconfig.test.json && node --test --test-concurrency=1 dist-tests/tests/typescript/*.test.js",
-    "format": "prettier --write src/index.ts src/mailbox.ts tests/**/*.ts README.md package.json tsconfig.json tsconfig.test.json"
+    "format": "prettier --write src/index.ts src/control.ts src/mailbox.ts tests/**/*.ts README.md package.json tsconfig.json tsconfig.test.json"
   },
   "keywords": [
     "pi",
@@ -63,6 +63,7 @@
   },
   "files": [
     "src/index.ts",
+    "src/control.ts",
     "src/mailbox.ts",
     "README.md",
     "CHANGELOG.md",

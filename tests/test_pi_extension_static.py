@@ -567,7 +567,14 @@ def test_pi_package_declares_pi_runtime_peers() -> None:
     assert all(manifest["peerDependenciesMeta"][name]["optional"] for name in expected_peers)
     assert manifest["publishConfig"]["access"] == "public"
     files = manifest["files"]
-    assert files == ["src/index.ts", "src/mailbox.ts", "README.md", "CHANGELOG.md", "LICENSE.md"]
+    assert files == [
+        "src/index.ts",
+        "src/control.ts",
+        "src/mailbox.ts",
+        "README.md",
+        "CHANGELOG.md",
+        "LICENSE.md",
+    ]
     assert "LICENSE" not in files
     raw = PI_PACKAGE.read_text(encoding="utf-8")
     assert "./integrations/pi" not in raw
