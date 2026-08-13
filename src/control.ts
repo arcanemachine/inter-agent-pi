@@ -541,12 +541,14 @@ interface DedupRecord {
 interface AbortRecord {
   id: string;
   controller: string;
-  /** Next response sequence for this abort request (0 accepted, 1 started, 2 terminal). */
+  /** Next response sequence for this abort request. */
   sequence: number;
+  started: boolean;
 }
 
 interface StandaloneAbortOperation {
   requests: AbortRecord[];
+  abortApplied: boolean;
 }
 
 interface ActiveOperation {
@@ -799,7 +801,7 @@ export class ControlEngine {
       );
       return;
     }
-    if (this.active !== null) {
+    if (this.active !== null || this.standaloneAbort !== null) {
       this.emitRejection(
         fromName,
         request.id,
@@ -892,6 +894,7 @@ export class ControlEngine {
     if (operation.abortRequests.length > 0 && !operation.abortApplied) {
       operation.abortApplied = true;
       this.host.abort();
+      this.startAbortRequests(operation.abortRequests);
     }
     if (
       operation.settledPending ||
@@ -946,6 +949,25 @@ export class ControlEngine {
     this.clearActive();
   }
 
+  private startAbortRequests(requests: AbortRecord[]): void {
+    for (const abort of requests) {
+      if (abort.started) continue;
+      abort.started = true;
+      this.sendResponse(
+        abort.controller,
+        this.buildResponse(
+          abort.id,
+          "abort",
+          "started",
+          abort.sequence++,
+          {},
+          null,
+        ),
+        true,
+      );
+    }
+  }
+
   private dispatchAbort(fromName: string, request: ControlRequest): void {
     if (this.shuttingDown) {
       this.emitRejection(
@@ -960,15 +982,11 @@ export class ControlEngine {
     const record: AbortRecord = {
       id: request.id,
       controller: fromName,
-      sequence: 2,
+      sequence: 1,
+      started: false,
     };
 
     if (this.active !== null) {
-      if (this.active.abortRequests.some((abort) => abort.id === request.id)) {
-        const record = this.lookupRecord(fromName, request.id);
-        if (record) this.replayRecord(fromName, record);
-        return;
-      }
       if (this.active.abortRequests.length >= CONTROL_ABORT_REQUESTS_MAX) {
         this.emitRejection(
           fromName,
@@ -985,16 +1003,14 @@ export class ControlEngine {
         this.buildResponse(request.id, "abort", "accepted", 0, {}, null),
         true,
       );
-      this.sendResponse(
-        fromName,
-        this.buildResponse(request.id, "abort", "started", 1, {}, null),
-        true,
-      );
       // Admission must win the race: a pending submitUserMessage can still be
       // rejected or reserved, so apply abort only after it has resolved.
       if (!this.active.admissionPending && !this.active.abortApplied) {
         this.active.abortApplied = true;
         this.host.abort();
+      }
+      if (this.active.abortApplied) {
+        this.startAbortRequests(this.active.abortRequests);
       }
       const operation = this.active;
       if (operation !== null && operation.abortApplied && this.isFullyIdle()) {
@@ -1004,13 +1020,6 @@ export class ControlEngine {
     }
 
     if (this.standaloneAbort !== null) {
-      if (
-        this.standaloneAbort.requests.some((abort) => abort.id === request.id)
-      ) {
-        const record = this.lookupRecord(fromName, request.id);
-        if (record) this.replayRecord(fromName, record);
-        return;
-      }
       if (this.standaloneAbort.requests.length >= CONTROL_ABORT_REQUESTS_MAX) {
         this.emitRejection(
           fromName,
@@ -1027,12 +1036,13 @@ export class ControlEngine {
         this.buildResponse(request.id, "abort", "accepted", 0, {}, null),
         true,
       );
-      this.sendResponse(
-        fromName,
-        this.buildResponse(request.id, "abort", "started", 1, {}, null),
-        true,
-      );
-      this.host.abort();
+      if (!this.standaloneAbort.abortApplied) {
+        this.standaloneAbort.abortApplied = true;
+        this.host.abort();
+      }
+      if (this.standaloneAbort.abortApplied) {
+        this.startAbortRequests(this.standaloneAbort.requests);
+      }
       if (this.isFullyIdle()) this.finalizeStandaloneAbort();
       return;
     }
@@ -1054,18 +1064,15 @@ export class ControlEngine {
       return;
     }
 
-    this.standaloneAbort = { requests: [record] };
+    this.standaloneAbort = { requests: [record], abortApplied: false };
     this.sendResponse(
       fromName,
       this.buildResponse(request.id, "abort", "accepted", 0, {}, null),
       true,
     );
-    this.sendResponse(
-      fromName,
-      this.buildResponse(request.id, "abort", "started", 1, {}, null),
-      true,
-    );
+    this.standaloneAbort.abortApplied = true;
     this.host.abort();
+    this.startAbortRequests(this.standaloneAbort.requests);
     if (this.isFullyIdle()) this.finalizeStandaloneAbort();
   }
 

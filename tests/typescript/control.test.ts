@@ -582,6 +582,10 @@ test("human-only abort waits for settlement and appears in state", async () => {
   host.idle = false;
   send(engine, "leader", request("abort", {}, "human-abort"));
   assert.equal(host.aborts, 1);
+  assert.deepEqual(
+    host.responsesFor("human-abort").map((response) => response.phase),
+    ["accepted", "started"],
+  );
   const humanAbortResponses = host.responsesFor("human-abort");
   assert.equal(
     humanAbortResponses[humanAbortResponses.length - 1]?.phase,
@@ -613,7 +617,10 @@ test("abort interrupts an active op and dual-settles at agent_settled", async ()
   await tick();
   send(engine, "leader", request("abort", {}, "a1"));
   assert.equal(host.aborts, 1);
-  assert.equal(host.responsesFor("a1").slice(-1)[0]?.phase, "started");
+  assert.deepEqual(
+    host.responsesFor("a1").map((response) => response.phase),
+    ["accepted", "started"],
+  );
 
   // Streaming stops; the run settles.
   engine.onAgentSettled();
@@ -679,6 +686,18 @@ test("abort during admission is applied after admission and settles the pair", a
   assert.equal(host.responsesFor("gated-abort").slice(-1)[0]?.phase, "settled");
 });
 
+test("abort is serialized against a pending standalone abort", async () => {
+  const host = new FakeHost();
+  const { engine } = makeEngine(host, "leader");
+  host.idle = false;
+  send(engine, "leader", request("abort", {}, "human-abort"));
+  send(engine, "leader", request("prompt", { text: "blocked" }, "blocked"));
+  assert.equal(host.userMessages.length, 0);
+  assert.equal(host.responsesFor("blocked").slice(-1)[0]?.error?.code, "busy");
+  engine.onAgentSettled();
+  await tick();
+});
+
 test("shutdown acknowledges, calls shutdown, and rejects later requests", () => {
   const host = new FakeHost();
   const { engine } = makeEngine(host, "leader");
@@ -707,6 +726,48 @@ test("shutdown acknowledges, calls shutdown, and rejects later requests", () => 
   );
 });
 
+test("same abort id is isolated by controller during active work", async () => {
+  const host = new FakeHost();
+  const { engine } = makeEngine(host, "leader,supervisor");
+  host.idle = false;
+  send(engine, "leader", request("steer", { text: "s" }, "run"));
+  await tick();
+  send(engine, "leader", request("abort", {}, "same"));
+  send(engine, "supervisor", request("abort", {}, "same"));
+  assert.deepEqual(
+    host.responsesFor("same").map((response) => response.phase),
+    ["accepted", "started", "accepted", "started"],
+  );
+  assert.equal(host.aborts, 1);
+  engine.onAgentSettled();
+  await tick();
+  assert.equal(
+    host.responsesFor("same").filter((response) => response.phase === "settled")
+      .length,
+    2,
+  );
+});
+
+test("same abort id is isolated by controller during standalone work", async () => {
+  const host = new FakeHost();
+  const { engine } = makeEngine(host, "leader,supervisor");
+  host.idle = false;
+  send(engine, "leader", request("abort", {}, "same"));
+  send(engine, "supervisor", request("abort", {}, "same"));
+  assert.equal(host.aborts, 1);
+  assert.deepEqual(
+    host.responsesFor("same").map((response) => response.phase),
+    ["accepted", "started", "accepted", "started"],
+  );
+  engine.onAgentSettled();
+  await tick();
+  assert.equal(
+    host.responsesFor("same").filter((response) => response.phase === "settled")
+      .length,
+    2,
+  );
+});
+
 test("two aborts settle both abort requests at the pair finalize", async () => {
   const host = new FakeHost();
   const { engine } = makeEngine(host, "leader,supervisor");
@@ -716,6 +777,10 @@ test("two aborts settle both abort requests at the pair finalize", async () => {
   send(engine, "leader", request("abort", {}, "a1"));
   send(engine, "supervisor", request("abort", {}, "a2"));
   assert.equal(host.aborts, 1);
+  assert.deepEqual(
+    host.responsesFor("a2").map((response) => response.phase),
+    ["accepted", "started"],
+  );
   engine.onAgentSettled();
   await tick();
   assert.equal(
