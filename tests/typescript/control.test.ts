@@ -8,14 +8,22 @@ import {
   CONTROL_FINAL_TEXT_MAX_BYTES,
   CONTROL_INJECTED_TEXT_MAX_BYTES,
   CONTROL_RESPONSE_QUEUE_MAX,
+  ControlController,
+  CONTROL_INITIAL_ACK_TIMEOUT_MS,
   ControlEngine,
+  buildControlRequest,
   describeFinalAssistant,
   isValidRoutingName,
   parseAllowControlFlag,
   parseControlRequestPayload,
   parseControlResponsePayload,
 } from "../../src/control.js";
-import type { ControlHost, ControlResponse } from "../../src/control.js";
+import type {
+  ControlControllerHost,
+  ControlHost,
+  ControlResponse,
+  ControlWireRequest,
+} from "../../src/control.js";
 
 // ── Fakes ───────────────────────────────────────────────────────────────────
 
@@ -145,6 +153,248 @@ function assistantMessage(
 async function tick(): Promise<void> {
   await new Promise((resolve) => setTimeout(resolve, 0));
 }
+
+class ControllerHost implements ControlControllerHost {
+  ready = true;
+  idle = true;
+  pending = false;
+  requests: { target: string; payload: ControlWireRequest }[] = [];
+  results: {
+    message: {
+      customType: string;
+      content: string;
+      details: Record<string, unknown>;
+    };
+    trigger: boolean;
+  }[] = [];
+  notices: string[] = [];
+  timers: { fn: () => void; cancelled: boolean }[] = [];
+  onSubmit: ((payload: ControlWireRequest, target: string) => void) | null =
+    null;
+  isListenerReady(): boolean {
+    return this.ready;
+  }
+  submitControlRequest(
+    target: string,
+    payload: ControlWireRequest,
+  ): Promise<boolean> {
+    this.requests.push({ target, payload });
+    this.onSubmit?.(payload, target);
+    return Promise.resolve(true);
+  }
+  isIdle(): boolean {
+    return this.idle;
+  }
+  hasPendingMessages(): boolean {
+    return this.pending;
+  }
+  sendResult(
+    message: {
+      customType: string;
+      content: string;
+      details: Record<string, unknown>;
+    },
+    trigger: boolean,
+  ): void {
+    this.results.push({ message, trigger });
+  }
+  notify(body: string): void {
+    this.notices.push(body);
+  }
+  schedule(fn: () => void, _ms: number): () => void {
+    const timer = { fn, cancelled: false };
+    this.timers.push(timer);
+    return () => {
+      timer.cancelled = true;
+    };
+  }
+  fireTimers(): void {
+    for (const timer of this.timers) {
+      if (!timer.cancelled) {
+        timer.cancelled = true;
+        timer.fn();
+      }
+    }
+  }
+}
+
+// ── Controller surface ──────────────────────────────────────────────────────
+
+test("shared controller request builder validates command text and replay IDs", () => {
+  const generated = buildControlRequest("worker-a", "prompt", "hello");
+  assert.equal(generated.ok, true);
+  if (generated.ok) {
+    assert.equal(generated.request.command, "prompt");
+    assert.equal(generated.request.args.text, "hello");
+    assert.match(generated.request.id, /^[A-Za-z0-9._:-]{1,128}$/);
+  }
+  const replay = buildControlRequest(
+    "worker-a",
+    "state",
+    undefined,
+    "replay-1",
+  );
+  assert.equal(replay.ok, true);
+  if (replay.ok) assert.equal(replay.request.id, "replay-1");
+  assert.equal(buildControlRequest("worker-a", "prompt").ok, false);
+  assert.equal(buildControlRequest("worker-a", "state", "body").ok, false);
+  assert.equal(buildControlRequest("Worker-a", "state").ok, false);
+});
+
+test("controller registers before submission and returns accepted without waiting for settlement", async () => {
+  const host = new ControllerHost();
+  const controller = new ControlController(host);
+  host.onSubmit = (payload, target) => {
+    // The response-before-wait race is exercised by delivering synchronously
+    // from the fake submit path after registry setup.
+    controller.handleResponse(
+      {
+        kind: "response",
+        id: payload.id,
+        command: payload.command,
+        phase: "accepted",
+        sequence: 0,
+        data: {},
+        error: null,
+      },
+      target,
+    );
+  };
+  const promise = controller.execute("worker-a", "prompt", "hello", "r1");
+  const result = await promise;
+  assert.equal(result.details.requestId, "r1");
+  assert.equal(host.requests.length, 1);
+  assert.equal(host.results.length, 0);
+});
+
+test("controller returns pre-accept rejection and explicit unknown-outcome timeout wording", async () => {
+  const host = new ControllerHost();
+  const controller = new ControlController(host);
+  host.onSubmit = (payload) => {
+    controller.handleResponse(
+      {
+        kind: "response",
+        id: payload.id,
+        command: payload.command,
+        phase: "rejected",
+        sequence: 0,
+        data: {},
+        error: { code: "busy", message: "busy" },
+      },
+      "worker-a",
+    );
+  };
+  const rejected = await controller.execute(
+    "worker-a",
+    "state",
+    undefined,
+    "reject-1",
+  );
+  assert.match(rejected.content[0].text, /busy/);
+
+  const timeoutHost = new ControllerHost();
+  const timeoutController = new ControlController(timeoutHost);
+  const timed = timeoutController.execute(
+    "worker-a",
+    "state",
+    undefined,
+    "timeout-1",
+  );
+  timeoutHost.fireTimers();
+  const timeout = await timed;
+  assert.match(timeout.content[0].text, /unknown/);
+  assert.match(timeout.content[0].text, /do not retry automatically/);
+  assert.equal(CONTROL_INITIAL_ACK_TIMEOUT_MS, 5000);
+});
+
+test("state fast path returns terminal response and terminal results coalesce exactly once", async () => {
+  const host = new ControllerHost();
+  const controller = new ControlController(host);
+  host.onSubmit = (payload) => {
+    controller.handleResponse(
+      {
+        kind: "response",
+        id: payload.id,
+        command: payload.command,
+        phase: "accepted",
+        sequence: 0,
+        data: {},
+        error: null,
+      },
+      "worker-a",
+    );
+  };
+  const statePromise = controller.execute(
+    "worker-a",
+    "state",
+    undefined,
+    "state-1",
+  );
+  await tick();
+  controller.handleResponse(
+    {
+      kind: "response",
+      id: "state-1",
+      command: "state",
+      phase: "settled",
+      sequence: 1,
+      data: { lifecycle: "idle" },
+      error: null,
+    },
+    "worker-a",
+  );
+  const state = await statePromise;
+  assert.deepEqual(state.details.data, { lifecycle: "idle" });
+
+  const run = controller.execute("worker-a", "prompt", "x", "run-1");
+  await tick();
+  controller.handleResponse(
+    {
+      kind: "response",
+      id: "run-1",
+      command: "prompt",
+      phase: "accepted",
+      sequence: 0,
+      data: {},
+      error: null,
+    },
+    "worker-a",
+  );
+  await run;
+  host.idle = false;
+  controller.handleResponse(
+    {
+      kind: "response",
+      id: "run-1",
+      command: "prompt",
+      phase: "settled",
+      sequence: 2,
+      data: { text: "done" },
+      error: null,
+    },
+    "worker-a",
+  );
+  controller.handleResponse(
+    {
+      kind: "response",
+      id: "missing",
+      command: "prompt",
+      phase: "settled",
+      sequence: 2,
+      data: { text: "ignored" },
+      error: null,
+    },
+    "worker-a",
+  );
+  assert.equal(host.results.length, 0);
+  host.idle = true;
+  controller.onAgentSettled();
+  assert.equal(host.results.length, 1);
+  assert.equal(host.results[0].trigger, true);
+  assert.match(host.results[0].message.content, /done/);
+  controller.onAgentSettled();
+  assert.equal(host.results.length, 1);
+});
 
 // ── Flag parsing and routing names ──────────────────────────────────────────
 

@@ -73,8 +73,18 @@ import type {
   ReloadHandoffCarrier,
 } from "./mailbox.js";
 
-import { ControlEngine, CONTROL_CUSTOM_TYPE } from "./control.js";
-import type { ControlHost, ControlResponse } from "./control.js";
+import {
+  ControlController,
+  ControlEngine,
+  CONTROL_CUSTOM_TYPE,
+} from "./control.js";
+import type {
+  ControlControllerHost,
+  ControlHost,
+  ControlResponse,
+  ControlToolResult,
+  ControlWireRequest,
+} from "./control.js";
 
 // ── Configuration ───────────────────────────────────────────────────────────
 
@@ -340,6 +350,7 @@ let currentConnection: ConnectionState | null = null;
 let activeStop: Promise<boolean> | null = null;
 let mailboxController: MailboxDispatcher | null = null;
 let controlEngine: ControlEngine | null = null;
+let controlController: ControlController | null = null;
 
 // ── Helpers ─────────────────────────────────────────────────────────────────
 
@@ -1250,6 +1261,68 @@ export default function (pi: ExtensionAPI) {
     });
   }
 
+  const controlControllerHost: ControlControllerHost = {
+    isListenerReady: () => listenerReady && currentConnection !== null,
+    submitControlRequest: (target: string, payload: ControlWireRequest) =>
+      execControlRequest(target, payload),
+    isIdle: () => currentCtx?.isIdle() ?? true,
+    hasPendingMessages: () => currentCtx?.hasPendingMessages() ?? false,
+    sendResult: (message, triggerTurn) =>
+      pi.sendMessage(message, { triggerTurn, deliverAs: "followUp" }),
+    notify: (body, type = "info") =>
+      notify("[inter-agent] control", body, type),
+    schedule: (fn, ms) => {
+      const handle = setTimeout(fn, ms);
+      return () => clearTimeout(handle);
+    },
+  };
+  function execControlRequest(
+    target: string,
+    payload: ControlWireRequest,
+  ): Promise<boolean> {
+    if (!listenerReady || !currentConnection) return Promise.resolve(false);
+    return new Promise((resolve) => {
+      const scripts = currentScripts();
+      if (scripts.unavailableMessage) {
+        resolve(false);
+        return;
+      }
+      const proc = spawnChildProcess(
+        scripts.pi,
+        ["control-send", "--name", currentConnection.name],
+        {
+          stdio: ["pipe", "pipe", "pipe"],
+          shell: false,
+          env: interAgentEnv(),
+        },
+      );
+      let stdout = "";
+      proc.stdout?.on("data", (d: Buffer) => {
+        stdout += d.toString();
+      });
+      proc.stdin?.end(
+        JSON.stringify({
+          custom_type: CONTROL_CUSTOM_TYPE,
+          payload,
+          to: target,
+        }) + "\n",
+      );
+      proc.on("close", (code) => {
+        if (code !== 0) {
+          resolve(false);
+          return;
+        }
+        try {
+          const result = JSON.parse(stdout) as { op?: unknown };
+          resolve(result.op === "custom_ok");
+        } catch {
+          resolve(false);
+        }
+      });
+      proc.on("error", () => resolve(false));
+    });
+  }
+
   const controlHost: ControlHost = {
     isIdle: () => currentCtx?.isIdle() ?? true,
     hasPendingMessages: () => currentCtx?.hasPendingMessages() ?? false,
@@ -1284,6 +1357,10 @@ export default function (pi: ExtensionAPI) {
     notifyWarning: (body) => notify("[inter-agent] control", body, "warning"),
   };
   controlEngine = new ControlEngine(pi, controlHost);
+  controlController = new ControlController(controlControllerHost);
+  controlEngine.setResponseHandler((response, fromName) =>
+    controlController?.handleResponse(response, fromName),
+  );
 
   // ── Mailbox state and delivery ───────────────────────────────
   const initialMode = effectiveDeliveryMode(config.deliveryMode);
@@ -1535,6 +1612,9 @@ export default function (pi: ExtensionAPI) {
     // Fail active control work before the listener is stopped so best-effort
     // failure responses can still reach controllers; same-process reload uses
     // target_reloading, every other shutdown reason target_disconnected.
+    controlController?.onSessionShutdown(
+      event?.reason === "reload" ? "target_reloading" : "target_disconnected",
+    );
     controlEngine?.onSessionShutdown(event?.reason);
     const reload = event?.reason === "reload";
     const targetCtx = currentCtx ?? ctx;
@@ -1604,6 +1684,7 @@ export default function (pi: ExtensionAPI) {
     // The control engine's single terminal settle authority fires here too;
     // it only acts when a completion-tracked remote operation is active.
     controlEngine?.onAgentSettled();
+    controlController?.onAgentSettled();
     mailbox.settle();
   });
 
@@ -1665,6 +1746,11 @@ export default function (pi: ExtensionAPI) {
       description:
         "Set [i]mmediate or [q]ueued (via mailbox) message delivery <immediate|queued>",
     },
+    {
+      value: "control",
+      label: "control",
+      description: "Control an allowlisted Pi target",
+    },
   ];
 
   async function handleConnect(args: string, ctx: ExtensionContext) {
@@ -1698,6 +1784,7 @@ export default function (pi: ExtensionAPI) {
   async function handleDisconnect(_args: string, ctx: ExtensionContext) {
     // Fail active control work with target_disconnected before the listener
     // is removed so best-effort responses can still reach controllers.
+    controlController?.onSessionShutdown("target_disconnected");
     controlEngine?.onExplicitDisconnect();
     const stopped = await stopListener(pi, ctx, { expected: true });
     if (stopped) {
@@ -1770,6 +1857,7 @@ export default function (pi: ExtensionAPI) {
 
     // Rename replaces the listener identity; fail active control work with
     // target_disconnected and clear tracking before the replacement.
+    controlController?.onSessionShutdown("target_disconnected");
     controlEngine?.onExplicitDisconnect();
     const started = await startListener(pi, ctx, config, parsed.name, label, {
       notifyOnReady: true,
@@ -2028,6 +2116,34 @@ export default function (pi: ExtensionAPI) {
     notify("[inter-agent] unsubscribed", channel);
   }
 
+  async function handleControl(args: string, _ctx: ExtensionContext) {
+    const parts = splitCommandArgs(args.trim());
+    if (parts.length < 2) {
+      notify(
+        "[inter-agent] control failed",
+        "usage: /inter-agent control <target> <prompt|steer|follow_up|abort|state|shutdown> [text]",
+        "error",
+      );
+      return;
+    }
+    const [target, command, ...textParts] = parts;
+    const text = textParts.length > 0 ? textParts.join(" ") : undefined;
+    const result = await controlController?.execute(target, command, text);
+    if (!result) {
+      notify("[inter-agent] control failed", "controller unavailable", "error");
+      return;
+    }
+    if (result.details.error) {
+      notify(
+        "[inter-agent] control failed",
+        String(result.details.error),
+        "error",
+      );
+      return;
+    }
+    notify("[inter-agent] control", result.content[0].text);
+  }
+
   async function handleDelivery(args: string, _ctx: ExtensionContext) {
     const raw = args.trim();
     const first = raw.charAt(0).toLowerCase();
@@ -2101,7 +2217,7 @@ export default function (pi: ExtensionAPI) {
   function showInterAgentUsage() {
     notify(
       "[inter-agent] usage",
-      "usage: /inter-agent <connect|disconnect|kick|rename|send|broadcast|publish|channels|subscribe|unsubscribe|list|status|delivery> [args]",
+      "usage: /inter-agent <connect|disconnect|kick|rename|send|broadcast|publish|channels|subscribe|unsubscribe|list|status|delivery> [args]; control: /inter-agent control <target> <command> [text]",
       "warning",
     );
   }
@@ -2162,6 +2278,9 @@ export default function (pi: ExtensionAPI) {
         case "delivery":
           await handleDelivery(rest, ctx);
           break;
+        case "control":
+          await handleControl(rest, ctx);
+          break;
         default:
           showInterAgentUsage();
       }
@@ -2169,6 +2288,79 @@ export default function (pi: ExtensionAPI) {
   });
 
   // ── Tools ─────────────────────────────────────────────────────────────────
+
+  const controlTarget = Type.String({
+    minLength: 1,
+    description: "Target routing name",
+  });
+  const controlRequestId = Type.Optional(
+    Type.String({
+      minLength: 1,
+      maxLength: 128,
+      description: "Deliberate replay request ID",
+    }),
+  );
+  const controlToolParameters = Type.Union([
+    Type.Object({
+      target: controlTarget,
+      command: Type.Literal("prompt"),
+      text: Type.String({ description: "Prompt text" }),
+      requestId: controlRequestId,
+    }),
+    Type.Object({
+      target: controlTarget,
+      command: Type.Literal("steer"),
+      text: Type.String({ description: "Steering text" }),
+      requestId: controlRequestId,
+    }),
+    Type.Object({
+      target: controlTarget,
+      command: Type.Literal("follow_up"),
+      text: Type.String({ description: "Follow-up text" }),
+      requestId: controlRequestId,
+    }),
+    Type.Object({
+      target: controlTarget,
+      command: Type.Literal("abort"),
+      requestId: controlRequestId,
+    }),
+    Type.Object({
+      target: controlTarget,
+      command: Type.Literal("state"),
+      requestId: controlRequestId,
+    }),
+    Type.Object({
+      target: controlTarget,
+      command: Type.Literal("shutdown"),
+      requestId: controlRequestId,
+    }),
+  ]);
+
+  pi.registerTool({
+    name: "inter_agent_control",
+    label: "Control inter-agent Pi",
+    description:
+      "Send one asynchronous control request to an allowlisted Pi target. " +
+      "A timeout has unknown outcome; do not retry automatically.",
+    parameters: controlToolParameters,
+    async execute(_toolCallId, params, _signal, _onUpdate, _ctx) {
+      const args = params as {
+        target: string;
+        command: string;
+        text?: string;
+        requestId?: string;
+      };
+      const result = await controlController?.execute(
+        args.target,
+        args.command,
+        args.text,
+        args.requestId,
+      );
+      if (!result) throw new Error("control controller unavailable");
+      if (result.details.error) throw new Error(result.content[0].text);
+      return result;
+    },
+  });
 
   pi.registerTool({
     name: "inter_agent_send",

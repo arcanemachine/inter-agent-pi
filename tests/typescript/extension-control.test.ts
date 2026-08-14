@@ -529,6 +529,141 @@ test("responses queue while the listener is unavailable and flush on welcome", a
   });
 });
 
+test("registers the controller tool and grouped control command", async () => {
+  await withExtension(async ({ pi, listeners, controlSends }) => {
+    const tool = pi.tools.get("inter_agent_control");
+    assert.ok(tool, "inter_agent_control tool not registered");
+    const command = interAgentCommand(pi);
+    pi.setFlagValue("allow-control-by", "leader");
+    await runHandler(pi, "session_start", {}, pi.ctx);
+    await command.handler("connect leader", pi.ctx);
+    const listener = listeners[listeners.length - 1];
+    listener.emitStdout(JSON.stringify({ op: "welcome" }) + "\n");
+    await tick();
+
+    const toolPromise = tool.execute(
+      "call-1",
+      {
+        target: "worker-a",
+        command: "prompt",
+        text: "hello",
+        requestId: "tool-1",
+      },
+      undefined,
+      undefined,
+      pi.ctx,
+    ) as Promise<{ details: { requestId: string; phase: string } }>;
+    await tick();
+    const submitted = controlSends[controlSends.length - 1];
+    assert.ok(submitted, "controller request was not submitted");
+    const request = JSON.parse(submitted.proc.stdinEnded);
+    assert.equal(request.to, "worker-a");
+    assert.equal(request.payload.id, "tool-1");
+    assert.equal(request.payload.args.text, "hello");
+
+    emitControlFrame(
+      listener,
+      {
+        kind: "response",
+        id: "tool-1",
+        command: "prompt",
+        phase: "accepted",
+        sequence: 0,
+        data: {},
+        error: null,
+      },
+      "worker-a",
+    );
+    const accepted = await toolPromise;
+    assert.equal(accepted.details.requestId, "tool-1");
+    assert.equal(accepted.details.phase, "accepted");
+
+    emitControlFrame(
+      listener,
+      {
+        kind: "response",
+        id: "tool-1",
+        command: "prompt",
+        phase: "settled",
+        sequence: 2,
+        data: { text: "done" },
+        error: null,
+      },
+      "worker-a",
+    );
+    await tick();
+    const result = pi.messages.find(
+      (message) => message.message.customType === "inter-agent-control-result",
+    );
+    assert.ok(
+      result,
+      "terminal control result did not enter controller context",
+    );
+    assert.ok(result.message.content.includes("done"));
+    assert.equal(result.options.triggerTurn, true);
+
+    const commandPromise = command.handler(
+      "control worker-a state",
+      pi.ctx,
+    ) as Promise<void>;
+    await tick();
+    const stateSend = controlSends[controlSends.length - 1];
+    assert.equal(
+      JSON.parse(stateSend.proc.stdinEnded).payload.command,
+      "state",
+    );
+    emitControlFrame(
+      listener,
+      {
+        kind: "response",
+        id: JSON.parse(stateSend.proc.stdinEnded).payload.id,
+        command: "state",
+        phase: "accepted",
+        sequence: 0,
+        data: {},
+        error: null,
+      },
+      "worker-a",
+    );
+    emitControlFrame(
+      listener,
+      {
+        kind: "response",
+        id: JSON.parse(stateSend.proc.stdinEnded).payload.id,
+        command: "state",
+        phase: "settled",
+        sequence: 1,
+        data: { lifecycle: "idle" },
+        error: null,
+      },
+      "worker-a",
+    );
+    await commandPromise;
+    assert.ok(
+      pi.notifyLog.some((entry) => entry.message.includes("Control request")),
+    );
+  });
+});
+
+test("controller command rejects missing text without sending a second identity", async () => {
+  await withExtension(async ({ pi, listeners, controlSends }) => {
+    const command = interAgentCommand(pi);
+    await command.handler("connect leader", pi.ctx);
+    const listener = listeners[listeners.length - 1];
+    listener.emitStdout(JSON.stringify({ op: "welcome" }) + "\n");
+    await tick();
+    await command.handler("control worker-a prompt", pi.ctx);
+    assert.ok(
+      pi.notifyLog.some(
+        (entry) =>
+          entry.type === "error" && entry.message.includes("requires text"),
+      ),
+    );
+    assert.equal(controlSends.length, 0);
+    assert.equal(listeners.length, 1);
+  });
+});
+
 test("a tracked prompt injection reaches submitUserMessage with no delivery override", async () => {
   await withExtension(async ({ pi, listeners, controlSends }) => {
     const cmd = interAgentCommand(pi);

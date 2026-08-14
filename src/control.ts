@@ -24,6 +24,7 @@
  * transcript entries, settings, environment, argv, or the filesystem.
  */
 
+import { randomUUID } from "node:crypto";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 
 export const CONTROL_CUSTOM_TYPE = "pi.control.v1";
@@ -39,6 +40,9 @@ export const CONTROL_ERROR_CODE_MAX = 64;
 export const CONTROL_DEDUP_PER_SENDER = 256;
 export const CONTROL_RESPONSE_QUEUE_MAX = 256;
 export const CONTROL_ABORT_REQUESTS_MAX = 256;
+export const CONTROL_INITIAL_ACK_TIMEOUT_MS = 5000;
+export const CONTROL_PENDING_REQUESTS_MAX = 256;
+export const CONTROL_RESULT_CUSTOM_TYPE = "inter-agent-control-result";
 
 /** Safe identifier alphabet for request/response ids (UUIDs are the normal form). */
 const CONTROL_ID_RE = /^[A-Za-z0-9._:-]{1,128}$/;
@@ -125,6 +129,76 @@ export interface ControlResponse {
   sequence: number;
   data: Record<string, unknown>;
   error: { code: string; message: string } | null;
+}
+
+export interface ControlWireRequest {
+  kind: "request";
+  id: string;
+  command: ControlCommand;
+  args: Record<string, unknown>;
+}
+
+export type ControlBuildResult =
+  | { ok: true; request: ControlWireRequest }
+  | { ok: false; message: string };
+
+/** Build one strict wire request shared by the model tool and user command. */
+export function buildControlRequest(
+  target: unknown,
+  command: unknown,
+  text?: unknown,
+  requestId?: unknown,
+): ControlBuildResult {
+  if (!isValidRoutingName(target)) {
+    return { ok: false, message: "target must be an exact routing name" };
+  }
+  if (
+    typeof command !== "string" ||
+    !(CONTROL_COMMANDS as readonly string[]).includes(command)
+  ) {
+    return {
+      ok: false,
+      message:
+        "command must be one of prompt, steer, follow_up, abort, state, shutdown",
+    };
+  }
+  if (
+    requestId !== undefined &&
+    (typeof requestId !== "string" || !CONTROL_ID_RE.test(requestId))
+  ) {
+    return {
+      ok: false,
+      message: "requestId must use the safe control identifier alphabet",
+    };
+  }
+  const id = requestId === undefined ? randomUUID() : (requestId as string);
+  const safeCommand = command as ControlCommand;
+  const needsText =
+    safeCommand === "prompt" ||
+    safeCommand === "steer" ||
+    safeCommand === "follow_up";
+  if (needsText) {
+    if (typeof text !== "string") {
+      return { ok: false, message: `${command} requires text` };
+    }
+    if (utf8Bytes(text) > CONTROL_INJECTED_TEXT_MAX_BYTES) {
+      return {
+        ok: false,
+        message: `text exceeds ${CONTROL_INJECTED_TEXT_MAX_BYTES} bytes`,
+      };
+    }
+    return {
+      ok: true,
+      request: { kind: "request", id, command: safeCommand, args: { text } },
+    };
+  }
+  if (text !== undefined && text !== "") {
+    return { ok: false, message: `${command} does not accept text` };
+  }
+  return {
+    ok: true,
+    request: { kind: "request", id, command: safeCommand, args: {} },
+  };
 }
 
 // ── Small helpers ───────────────────────────────────────────────────────────
@@ -526,6 +600,340 @@ export interface ControlHost {
   notifyWarning(body: string): void;
 }
 
+export interface ControlControllerHost {
+  isListenerReady(): boolean;
+  submitControlRequest(
+    target: string,
+    payload: ControlWireRequest,
+  ): Promise<boolean>;
+  isIdle(): boolean;
+  hasPendingMessages(): boolean;
+  sendResult(
+    message: {
+      customType: string;
+      content: string;
+      display: true;
+      details: Record<string, unknown>;
+    },
+    triggerTurn: boolean,
+  ): void;
+  notify(body: string, type?: "info" | "warning" | "error"): void;
+  schedule(fn: () => void, ms: number): () => void;
+}
+
+export interface ControlToolResult {
+  content: [{ type: "text"; text: string }];
+  details: Record<string, unknown>;
+}
+
+interface ControllerPending {
+  target: string;
+  command: ControlCommand;
+  request: ControlWireRequest;
+  accepted: boolean;
+  timedOut: boolean;
+  initialDone: boolean;
+  resolveInitial: (result: ControlToolResult) => void;
+  timerCancel: (() => void) | null;
+}
+
+/** Controller-side request registry and terminal-result delivery coordinator. */
+export class ControlController {
+  private readonly pending = new Map<string, ControllerPending>();
+  private terminalQueue: ControlResponse[] = [];
+  private resultTurnPending = false;
+  private generation = 0;
+
+  constructor(private readonly host: ControlControllerHost) {}
+
+  async execute(
+    target: unknown,
+    command: unknown,
+    text?: unknown,
+    requestId?: unknown,
+  ): Promise<ControlToolResult> {
+    const built = buildControlRequest(target, command, text, requestId);
+    if (built.ok === false) return this.errorResult(built.message);
+    if (!this.host.isListenerReady()) {
+      return this.errorResult(
+        "Not connected to the inter-agent bus. Use /inter-agent connect first.",
+      );
+    }
+    if (this.pending.size >= CONTROL_PENDING_REQUESTS_MAX) {
+      return this.errorResult("too many control requests are pending");
+    }
+    if (this.pending.has(built.request.id)) {
+      return this.errorResult(
+        "requestId is already pending; do not retry automatically",
+      );
+    }
+    const request = built.request;
+    let resolveInitial!: (result: ControlToolResult) => void;
+    const initial = new Promise<ControlToolResult>((resolve) => {
+      resolveInitial = resolve;
+    });
+    const entry: ControllerPending = {
+      target: target as string,
+      command: request.command,
+      request,
+      accepted: false,
+      timedOut: false,
+      initialDone: false,
+      resolveInitial,
+      timerCancel: null,
+    };
+    // Register before submitting: a synchronous/fake response cannot race
+    // registration and disappear.
+    this.pending.set(request.id, entry);
+    const generation = this.generation;
+    entry.timerCancel = this.host.schedule(() => {
+      if (generation !== this.generation || entry.initialDone) return;
+      entry.initialDone = true;
+      entry.timedOut = true;
+      entry.resolveInitial(
+        this.errorResult(
+          "control request acknowledgement timed out; outcome is unknown; do not retry automatically",
+        ),
+      );
+    }, CONTROL_INITIAL_ACK_TIMEOUT_MS);
+    const submitted = await this.host
+      .submitControlRequest(entry.target, request)
+      .catch(() => false);
+    if (!submitted && !entry.initialDone) {
+      entry.initialDone = true;
+      entry.timedOut = true;
+      entry.timerCancel?.();
+      entry.resolveInitial(
+        this.errorResult(
+          "control request outcome is unknown because submission was not confirmed; do not retry automatically",
+        ),
+      );
+    }
+    return initial;
+  }
+
+  handleResponse(response: ControlResponse, fromName?: string): void {
+    const entry = this.pending.get(response.id);
+    if (!entry) return;
+    if (fromName !== entry.target) return;
+    if (response.phase === "accepted" || response.phase === "started") {
+      entry.accepted = true;
+      if (response.phase === "accepted") {
+        this.notifyStatus(entry, "accepted");
+      } else {
+        this.notifyStatus(entry, "started");
+      }
+      // State has an immediate terminal response and is the one command whose
+      // tool call may return that terminal payload directly.
+      if (!entry.initialDone && entry.command !== "state") {
+        entry.initialDone = true;
+        entry.timerCancel?.();
+        entry.resolveInitial(this.acceptedResult(entry, response));
+      }
+      return;
+    }
+    const terminal =
+      response.phase === "settled" ||
+      response.phase === "failed" ||
+      response.phase === "rejected";
+    if (!terminal) return;
+    if (!entry.accepted && !entry.initialDone) {
+      entry.initialDone = true;
+      entry.timerCancel?.();
+      entry.resolveInitial(
+        response.phase === "settled"
+          ? this.terminalResult(entry, response)
+          : this.errorResult(this.responseError(response)),
+      );
+      this.pending.delete(response.id);
+      return;
+    }
+    entry.timerCancel?.();
+    this.pending.delete(response.id);
+    if (!entry.accepted && !entry.timedOut) return;
+    if (!entry.initialDone) {
+      entry.initialDone = true;
+      entry.timerCancel?.();
+      entry.resolveInitial(
+        response.phase === "rejected" || response.phase === "failed"
+          ? this.errorResult(this.responseError(response))
+          : entry.command === "state"
+            ? this.terminalResult(entry, response)
+            : this.acceptedResult(entry, response),
+      );
+    }
+    if (entry.command !== "state") this.deliverTerminal(entry, response);
+  }
+
+  private notifyStatus(
+    _entry: ControllerPending,
+    phase: "accepted" | "started",
+  ): void {
+    this.host.notify(`control ${phase}`);
+  }
+
+  private acceptedResult(
+    entry: ControllerPending,
+    response: ControlResponse,
+  ): ControlToolResult {
+    return {
+      content: [
+        {
+          type: "text",
+          text: `Control request ${entry.request.id} accepted (${response.command})`,
+        },
+      ],
+      details: {
+        requestId: entry.request.id,
+        target: entry.target,
+        command: response.command,
+        phase: response.phase,
+      },
+    };
+  }
+
+  private responseError(response: ControlResponse): string {
+    return response.error
+      ? `${response.error.code}: ${response.error.message}`
+      : `control request ${response.phase}`;
+  }
+
+  private deliverTerminal(
+    entry: ControllerPending,
+    response: ControlResponse,
+  ): void {
+    if (
+      this.host.isIdle() &&
+      !this.host.hasPendingMessages() &&
+      this.terminalQueue.length === 0 &&
+      !this.resultTurnPending
+    ) {
+      this.resultTurnPending = true;
+      this.host.sendResult(this.resultMessage(entry, response), true);
+      return;
+    }
+    if (this.terminalQueue.length >= CONTROL_RESPONSE_QUEUE_MAX) {
+      const dropped = this.terminalQueue.shift();
+      if (dropped) this.terminalEntries.delete(dropped.id);
+      this.host.notify(
+        "control result queue full; dropped the oldest result",
+        "warning",
+      );
+    }
+    this.terminalQueue.push(response);
+    this.terminalEntries.set(response.id, entry);
+  }
+
+  private readonly terminalEntries = new Map<string, ControllerPending>();
+
+  onAgentSettled(): void {
+    if (!this.host.isIdle() || this.host.hasPendingMessages()) return;
+    // The controller turn triggered by the prior terminal result is complete;
+    // a queued burst may now trigger exactly one fresh turn.
+    this.resultTurnPending = false;
+    if (this.terminalQueue.length === 0) return;
+    const queue = this.terminalQueue.splice(0);
+    const entries = queue
+      .map((response) => this.terminalEntries.get(response.id))
+      .filter((entry): entry is ControllerPending => entry !== undefined);
+    for (const response of queue) this.terminalEntries.delete(response.id);
+    const triggerFirst = !this.resultTurnPending;
+    entries.forEach((entry, index) => {
+      const response = queue[index];
+      this.host.sendResult(
+        this.resultMessage(entry, response),
+        triggerFirst && index === 0,
+      );
+    });
+    this.resultTurnPending = true;
+  }
+
+  onSessionShutdown(
+    reason: "target_reloading" | "target_disconnected" = "target_disconnected",
+  ): void {
+    this.generation += 1;
+    const message =
+      reason === "target_reloading"
+        ? "target is reloading; no operation resumed after reload"
+        : "target inter-agent connection is gone";
+    for (const entry of this.pending.values()) {
+      entry.timerCancel?.();
+      if (!entry.initialDone) {
+        entry.initialDone = true;
+        entry.resolveInitial(this.errorResult(`${reason}: ${message}`));
+      }
+    }
+    this.pending.clear();
+    this.terminalQueue = [];
+    this.terminalEntries.clear();
+    this.resultTurnPending = false;
+  }
+
+  private terminalResult(
+    entry: ControllerPending,
+    response: ControlResponse,
+  ): ControlToolResult {
+    return {
+      content: [
+        {
+          type: "text",
+          text: response.error
+            ? this.responseError(response)
+            : `Control request ${entry.request.id} settled`,
+        },
+      ],
+      details: {
+        requestId: response.id,
+        target: entry.target,
+        command: response.command,
+        phase: response.phase,
+        data: response.data,
+        error: response.error,
+      },
+    };
+  }
+
+  private resultMessage(
+    entry: ControllerPending,
+    response: ControlResponse,
+  ): {
+    customType: string;
+    content: string;
+    display: true;
+    details: Record<string, unknown>;
+  } {
+    const details: Record<string, unknown> = {
+      requestId: response.id,
+      target: entry.target,
+      command: response.command,
+      phase: response.phase,
+      sequence: response.sequence,
+      data: response.data,
+      error: response.error,
+    };
+    const body = response.error
+      ? `${response.error.code}: ${response.error.message}`
+      : typeof response.data.text === "string"
+        ? response.data.text
+        : response.data.resultUnavailable
+          ? "No final assistant text was available."
+          : JSON.stringify(response.data);
+    return {
+      customType: CONTROL_RESULT_CUSTOM_TYPE,
+      content: `[inter-agent control result]\nTarget: ${entry.target}\nCommand: ${response.command}\nRequest: ${response.id}\nPhase: ${response.phase}\n\n${body}`,
+      display: true,
+      details,
+    };
+  }
+
+  private errorResult(message: string): ControlToolResult {
+    return {
+      content: [{ type: "text", text: message }],
+      details: { error: message },
+    };
+  }
+}
+
 // ── Engine internals ────────────────────────────────────────────────────────
 
 interface DedupRecord {
@@ -718,7 +1126,7 @@ export class ControlEngine {
       return;
     }
     if (kind === "response") {
-      this.handleResponse(frame.payload);
+      this.handleResponse(frame.payload, frame.fromName);
       return;
     }
     const label =
@@ -1329,7 +1737,18 @@ export class ControlEngine {
 
   // ── Response handling ─────────────────────────────────────────────────────
 
-  private handleResponse(raw: unknown): void {
+  private responseHandler:
+    | ((response: ControlResponse, fromName?: string) => void)
+    | null = null;
+
+  /** Attach the controller-side pending-response registry without changing target dispatch. */
+  setResponseHandler(
+    handler: ((response: ControlResponse, fromName?: string) => void) | null,
+  ): void {
+    this.responseHandler = handler;
+  }
+
+  private handleResponse(raw: unknown, fromName?: string): void {
     const parsed = parseControlResponsePayload(raw);
     if (parsed.ok === false) {
       this.host.notifyWarning(
@@ -1337,8 +1756,9 @@ export class ControlEngine {
       );
       return;
     }
-    // Valid responses are classified and consumed by the Task 4 controller
-    // pending-response registry; nothing here leaks them into the mailbox.
+    // Valid responses are classified before ordinary mailbox processing and
+    // handed to the controller-side registry. They never become mailbox items.
+    this.responseHandler?.(parsed.response, fromName);
   }
 
   // ── Responses, dedup, and reconnect queue ─────────────────────────────────
