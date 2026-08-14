@@ -312,11 +312,14 @@ const SERVER_START_WAIT_MS = 500;
 const LISTENER_STOP_SIGTERM_TIMEOUT_MS = 2000;
 const LISTENER_STOP_SIGKILL_TIMEOUT_MS = 2000;
 const CONTROL_HELPER_TIMEOUT_MS = 2500;
+const CONTROL_HELPER_SIGKILL_GRACE_MS = 100;
 const CONTROL_HELPER_MAX_STDOUT_BYTES = 64 * 1024;
 // Test seam: behavior tests shorten the kill races so a hung-child failing stop
 // exercise stays bounded; production keeps the real millisecond timeouts.
 let stopTermTimeoutMs = LISTENER_STOP_SIGTERM_TIMEOUT_MS;
 let stopKillTimeoutMs = LISTENER_STOP_SIGKILL_TIMEOUT_MS;
+let controlHelperTimeoutMs = CONTROL_HELPER_TIMEOUT_MS;
+let controlHelperSigkillGraceMs = CONTROL_HELPER_SIGKILL_GRACE_MS;
 
 /** @internal Shorten the listener stop kill races for behavior tests. */
 export function _setStopTimeoutsForTest(
@@ -325,6 +328,15 @@ export function _setStopTimeoutsForTest(
 ): void {
   stopTermTimeoutMs = termMs ?? LISTENER_STOP_SIGTERM_TIMEOUT_MS;
   stopKillTimeoutMs = killMs ?? LISTENER_STOP_SIGKILL_TIMEOUT_MS;
+}
+
+/** @internal Shorten controller-helper timeout races for behavior tests. */
+export function _setControlHelperTimeoutsForTest(
+  timeoutMs: number | null,
+  graceMs: number | null,
+): void {
+  controlHelperTimeoutMs = timeoutMs ?? CONTROL_HELPER_TIMEOUT_MS;
+  controlHelperSigkillGraceMs = graceMs ?? CONTROL_HELPER_SIGKILL_GRACE_MS;
 }
 // ── State ───────────────────────────────────────────────────────────────────
 
@@ -1229,39 +1241,21 @@ export default function (pi: ExtensionAPI) {
       let stdout = "";
       let stdoutBytes = 0;
       let settled = false;
-      const timer = setTimeout(() => finish(false), CONTROL_HELPER_TIMEOUT_MS);
-      const finish = (ok: boolean): void => {
-        if (settled) return;
-        settled = true;
-        clearTimeout(timer);
-        if (!ok && proc.exitCode === null && proc.signalCode === null) {
-          try {
-            proc.kill("SIGTERM");
-          } catch {
-            // The helper may have exited between the state check and kill.
-          }
-        }
-        resolve(ok);
-      };
-      proc.stdout?.on("data", (d: Buffer) => {
+      let deadlineTimer: ReturnType<typeof setTimeout> | null = null;
+      let killTimer: ReturnType<typeof setTimeout> | null = null;
+
+      const onStdout = (d: Buffer): void => {
         stdoutBytes += d.byteLength;
         if (stdoutBytes > CONTROL_HELPER_MAX_STDOUT_BYTES) {
-          finish(false);
+          requestTermination();
           return;
         }
         stdout += d.toString();
-      });
-      proc.stderr?.on("data", () => {
+      };
+      const onStderr = (): void => {
         // Local helper diagnostics are not user-facing control responses.
-      });
-      proc.stdin?.end(
-        JSON.stringify({
-          custom_type: CONTROL_CUSTOM_TYPE,
-          payload,
-          to: target,
-        }) + "\n",
-      );
-      proc.on("close", (code) => {
+      };
+      const onClose = (code: number | null): void => {
         if (code !== 0) {
           finish(false);
           return;
@@ -1272,8 +1266,60 @@ export default function (pi: ExtensionAPI) {
         } catch {
           finish(false);
         }
-      });
-      proc.on("error", () => finish(false));
+      };
+      const onError = (): void => finish(false);
+      const cleanup = (): void => {
+        if (deadlineTimer) clearTimeout(deadlineTimer);
+        if (killTimer) clearTimeout(killTimer);
+        proc.stdout?.off("data", onStdout);
+        proc.stderr?.off("data", onStderr);
+        proc.off("close", onClose);
+        proc.off("error", onError);
+      };
+      const finish = (ok: boolean): void => {
+        if (settled) return;
+        settled = true;
+        cleanup();
+        resolve(ok);
+      };
+      const requestTermination = (): void => {
+        if (settled) return;
+        if (proc.exitCode !== null || proc.signalCode !== null) {
+          finish(false);
+          return;
+        }
+        try {
+          proc.kill("SIGTERM");
+        } catch {
+          // The helper may have exited between the state check and kill.
+        }
+        if (settled) return;
+        killTimer = setTimeout(() => {
+          if (!settled && proc.exitCode === null && proc.signalCode === null) {
+            try {
+              proc.kill("SIGKILL");
+            } catch {
+              // The helper may have exited before escalation.
+            }
+          }
+          finish(false);
+        }, controlHelperSigkillGraceMs);
+        killTimer.unref?.();
+      };
+
+      proc.stdout?.on("data", onStdout);
+      proc.stderr?.on("data", onStderr);
+      proc.on("close", onClose);
+      proc.on("error", onError);
+      deadlineTimer = setTimeout(requestTermination, controlHelperTimeoutMs);
+      deadlineTimer.unref?.();
+      proc.stdin?.end(
+        JSON.stringify({
+          custom_type: CONTROL_CUSTOM_TYPE,
+          payload,
+          to: target,
+        }) + "\n",
+      );
     });
   }
 

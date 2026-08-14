@@ -478,6 +478,142 @@ test("state fast path returns terminal response and terminal results coalesce ex
   assert.equal(host.results.length, 1);
 });
 
+test("active terminal bursts coalesce three results with one trigger in order", async () => {
+  const host = new ControllerHost();
+  const controller = new ControlController(host);
+  const ids = ["burst-1", "burst-2", "burst-3"];
+  const requests = ids.map((id) =>
+    controller.execute("worker-a", "prompt", id, id),
+  );
+  await tick();
+  for (const id of ids) {
+    controller.handleResponse(
+      {
+        kind: "response",
+        id,
+        command: "prompt",
+        phase: "accepted",
+        sequence: 0,
+        data: {},
+        error: null,
+      },
+      "worker-a",
+    );
+  }
+  await Promise.all(requests);
+  host.idle = false;
+  ids.forEach((id, index) =>
+    controller.handleResponse(
+      {
+        kind: "response",
+        id,
+        command: "prompt",
+        phase: "settled",
+        sequence: 2,
+        data: { text: `done-${index + 1}` },
+        error: null,
+      },
+      "worker-a",
+    ),
+  );
+  assert.equal(host.results.length, 0);
+  host.idle = true;
+  controller.onAgentSettled();
+  assert.equal(host.results.length, 3);
+  assert.deepEqual(
+    host.results.map((result) => result.message.details.requestId),
+    ids,
+  );
+  assert.deepEqual(
+    host.results.map((result) => result.trigger),
+    [true, false, false],
+  );
+  controller.onAgentSettled();
+  assert.equal(host.results.length, 3);
+});
+
+test("queued results after an idle-triggered result wait for its settle turn", async () => {
+  const host = new ControllerHost();
+  const controller = new ControlController(host);
+  const first = controller.execute("worker-a", "prompt", "one", "one");
+  await tick();
+  controller.handleResponse(
+    {
+      kind: "response",
+      id: "one",
+      command: "prompt",
+      phase: "accepted",
+      sequence: 0,
+      data: {},
+      error: null,
+    },
+    "worker-a",
+  );
+  await first;
+  controller.handleResponse(
+    {
+      kind: "response",
+      id: "one",
+      command: "prompt",
+      phase: "settled",
+      sequence: 2,
+      data: { text: "one" },
+      error: null,
+    },
+    "worker-a",
+  );
+  assert.deepEqual(
+    host.results.map((result) => result.trigger),
+    [true],
+  );
+
+  const ids = ["two", "three"];
+  const requests = ids.map((id) =>
+    controller.execute("worker-a", "prompt", id, id),
+  );
+  await tick();
+  ids.forEach((id) =>
+    controller.handleResponse(
+      {
+        kind: "response",
+        id,
+        command: "prompt",
+        phase: "accepted",
+        sequence: 0,
+        data: {},
+        error: null,
+      },
+      "worker-a",
+    ),
+  );
+  await Promise.all(requests);
+  host.idle = false;
+  ids.forEach((id) =>
+    controller.handleResponse(
+      {
+        kind: "response",
+        id,
+        command: "prompt",
+        phase: "settled",
+        sequence: 2,
+        data: { text: id },
+        error: null,
+      },
+      "worker-a",
+    ),
+  );
+  assert.equal(host.results.length, 1);
+  host.idle = true;
+  controller.onAgentSettled();
+  assert.equal(host.results.length, 3);
+  assert.deepEqual(
+    host.results.map((result) => result.trigger),
+    [true, true, false],
+  );
+  controller.onAgentSettled();
+  assert.equal(host.results.length, 3);
+});
+
 // ── Flag parsing and routing names ──────────────────────────────────────────
 
 test("parseAllowControlFlag trims, deduplicates, and validates entries", () => {

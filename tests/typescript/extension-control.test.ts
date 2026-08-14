@@ -12,6 +12,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import ext, {
+  _setControlHelperTimeoutsForTest,
   _setSpawnForTest,
   _setReloadCarrierForTest,
 } from "../../src/index.js";
@@ -37,6 +38,8 @@ class FakeChildProcess extends EventEmitter {
   pid = 12345;
   exitCode: number | null = null;
   signalCode: NodeJS.Signals | null = null;
+  killSignals: NodeJS.Signals[] = [];
+  ignoreSigterm = false;
   // The extension writes the control-send request here.
   stdinEnded = "";
   [key: string]: unknown;
@@ -54,6 +57,8 @@ class FakeChildProcess extends EventEmitter {
 
   kill(signal: NodeJS.Signals = "SIGTERM"): boolean {
     if (this.exitCode !== null || this.signalCode !== null) return false;
+    this.killSignals.push(signal);
+    if (signal === "SIGTERM" && this.ignoreSigterm) return false;
     this.signalCode = signal;
     this.emit("exit", null, signal);
     this.emit("close", null, signal);
@@ -220,6 +225,7 @@ function withExtension(
     listeners: FakeChildProcess[];
     controlSends: Spawned[];
   }) => Promise<void>,
+  options: { controlSendIgnoreSigterm?: boolean } = {},
 ): Promise<void> {
   return (async () => {
     const env = setupEnv();
@@ -229,12 +235,14 @@ function withExtension(
     process.chdir(env.cwd);
     const listeners: FakeChildProcess[] = [];
     const controlSends: Spawned[] = [];
-    _setSpawnForTest(((cmd: string, args: string[], options: unknown) => {
+    _setSpawnForTest(((cmd: string, args: string[], spawnOptions: unknown) => {
       const record = (proc: FakeChildProcess): FakeChildProcess => {
         proc.spawnCmd = cmd;
         proc.spawnArgs = args;
         proc.spawnEnv = (
-          options as { env?: Record<string, string | undefined> } | undefined
+          spawnOptions as
+            | { env?: Record<string, string | undefined> }
+            | undefined
         )?.env;
         return proc;
       };
@@ -259,13 +267,16 @@ function withExtension(
       }
       if (args[0] === "control-send") {
         const proc = record(new FakeChildProcess());
+        proc.ignoreSigterm = options.controlSendIgnoreSigterm === true;
         controlSends.push({ proc, cmd, args });
-        queueMicrotask(() => {
-          proc.emitStdout(
-            JSON.stringify({ op: "custom_ok", submitted: true }) + "\n",
-          );
-          proc.exit(0);
-        });
+        if (!options.controlSendIgnoreSigterm) {
+          queueMicrotask(() => {
+            proc.emitStdout(
+              JSON.stringify({ op: "custom_ok", submitted: true }) + "\n",
+            );
+            proc.exit(0);
+          });
+        }
         return proc;
       }
       const proc = record(new FakeChildProcess());
@@ -282,6 +293,7 @@ function withExtension(
       process.env.HOME = oldHome;
       _setSpawnForTest(null);
       _setReloadCarrierForTest(null);
+      _setControlHelperTimeoutsForTest(null, null);
       process.chdir(oldCwd);
       rmSync(env.home, { recursive: true, force: true });
       rmSync(env.cwd, { recursive: true, force: true });
@@ -643,6 +655,39 @@ test("registers the controller tool and grouped control command", async () => {
       pi.notifyLog.some((entry) => entry.message.includes("Control request")),
     );
   });
+});
+
+test("hung controller helper escalates to SIGKILL and cleans listeners", async () => {
+  await withExtension(
+    async ({ pi, listeners, controlSends }) => {
+      _setControlHelperTimeoutsForTest(5, 5);
+      const command = interAgentCommand(pi);
+      await command.handler("connect leader", pi.ctx);
+      const listener = listeners[listeners.length - 1];
+      listener.emitStdout(JSON.stringify({ op: "welcome" }) + "\n");
+      await tick();
+      const tool = pi.tools.get("inter_agent_control");
+      assert.ok(tool);
+      await assert.rejects(
+        () =>
+          tool.execute(
+            "hung-call",
+            { target: "worker-a", command: "state", requestId: "hung-child" },
+            undefined,
+            undefined,
+            pi.ctx,
+          ) as Promise<unknown>,
+        /unknown/,
+      );
+      const helper = controlSends[controlSends.length - 1].proc;
+      assert.deepEqual(helper.killSignals, ["SIGTERM", "SIGKILL"]);
+      assert.equal(helper.stdout.listenerCount("data"), 0);
+      assert.equal(helper.stderr.listenerCount("data"), 0);
+      assert.equal(helper.listenerCount("close"), 0);
+      assert.equal(helper.listenerCount("error"), 0);
+    },
+    { controlSendIgnoreSigterm: true },
+  );
 });
 
 test("controller command rejects missing text without sending a second identity", async () => {
