@@ -696,19 +696,37 @@ export class ControlController {
         ),
       );
     }, CONTROL_INITIAL_ACK_TIMEOUT_MS);
-    const submitted = await this.host
-      .submitControlRequest(entry.target, request)
-      .catch(() => false);
-    if (!submitted && !entry.initialDone) {
-      entry.initialDone = true;
-      entry.timedOut = true;
-      entry.timerCancel?.();
-      entry.resolveInitial(
-        this.errorResult(
-          "control request outcome is unknown because submission was not confirmed; do not retry automatically",
-        ),
+    // Submission is deliberately detached from the tool's bounded initial
+    // response wait. A hung local helper must not keep the tool call alive past
+    // the acknowledgement bound; late responses remain correlated in memory.
+    void Promise.resolve()
+      .then(() => this.host.submitControlRequest(entry.target, request))
+      .then(
+        (submitted) => {
+          if (!submitted && !entry.initialDone) {
+            entry.initialDone = true;
+            entry.timedOut = true;
+            entry.timerCancel?.();
+            entry.resolveInitial(
+              this.errorResult(
+                "control request outcome is unknown because submission was not confirmed; do not retry automatically",
+              ),
+            );
+          }
+        },
+        () => {
+          if (!entry.initialDone) {
+            entry.initialDone = true;
+            entry.timedOut = true;
+            entry.timerCancel?.();
+            entry.resolveInitial(
+              this.errorResult(
+                "control request outcome is unknown because submission failed; do not retry automatically",
+              ),
+            );
+          }
+        },
       );
-    }
     return initial;
   }
 
@@ -716,6 +734,7 @@ export class ControlController {
     const entry = this.pending.get(response.id);
     if (!entry) return;
     if (fromName !== entry.target) return;
+    if (response.command !== entry.command) return;
     if (response.phase === "accepted" || response.phase === "started") {
       entry.accepted = true;
       if (response.phase === "accepted") {
@@ -762,14 +781,17 @@ export class ControlController {
             : this.acceptedResult(entry, response),
       );
     }
-    if (entry.command !== "state") this.deliverTerminal(entry, response);
+    if (entry.command !== "state" || entry.timedOut)
+      this.deliverTerminal(entry, response);
   }
 
   private notifyStatus(
-    _entry: ControllerPending,
+    entry: ControllerPending,
     phase: "accepted" | "started",
   ): void {
-    this.host.notify(`control ${phase}`);
+    this.host.notify(
+      `control ${phase}: target ${entry.target}, command ${entry.command}, request ${entry.request.id}`,
+    );
   }
 
   private acceptedResult(

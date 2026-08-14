@@ -311,6 +311,8 @@ const SERVER_START_WAIT_ATTEMPTS = 30;
 const SERVER_START_WAIT_MS = 500;
 const LISTENER_STOP_SIGTERM_TIMEOUT_MS = 2000;
 const LISTENER_STOP_SIGKILL_TIMEOUT_MS = 2000;
+const CONTROL_HELPER_TIMEOUT_MS = 2500;
+const CONTROL_HELPER_MAX_STDOUT_BYTES = 64 * 1024;
 // Test seam: behavior tests shorten the kill races so a hung-child failing stop
 // exercise stays bounded; production keeps the real millisecond timeouts.
 let stopTermTimeoutMs = LISTENER_STOP_SIGTERM_TIMEOUT_MS;
@@ -1205,9 +1207,9 @@ export default function (pi: ExtensionAPI) {
   // readiness, and inbound custom-frame classification. Responses travel back
   // through the target's own persistent agent connection via the internal
   // `control-send` bridge helper; payloads and prompt text never appear in argv.
-  function execControlSend(
-    controller: string,
-    payload: ControlResponse,
+  function execControlBridge(
+    target: string,
+    payload: ControlWireRequest | ControlResponse,
   ): Promise<boolean> {
     return new Promise((resolve) => {
       const scripts = currentScripts();
@@ -1225,7 +1227,28 @@ export default function (pi: ExtensionAPI) {
         },
       );
       let stdout = "";
+      let stdoutBytes = 0;
+      let settled = false;
+      const timer = setTimeout(() => finish(false), CONTROL_HELPER_TIMEOUT_MS);
+      const finish = (ok: boolean): void => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        if (!ok && proc.exitCode === null && proc.signalCode === null) {
+          try {
+            proc.kill("SIGTERM");
+          } catch {
+            // The helper may have exited between the state check and kill.
+          }
+        }
+        resolve(ok);
+      };
       proc.stdout?.on("data", (d: Buffer) => {
+        stdoutBytes += d.byteLength;
+        if (stdoutBytes > CONTROL_HELPER_MAX_STDOUT_BYTES) {
+          finish(false);
+          return;
+        }
         stdout += d.toString();
       });
       proc.stderr?.on("data", () => {
@@ -1235,30 +1258,30 @@ export default function (pi: ExtensionAPI) {
         JSON.stringify({
           custom_type: CONTROL_CUSTOM_TYPE,
           payload,
-          to: controller,
+          to: target,
         }) + "\n",
       );
-      const finish = (code: number | null): void => {
-        if (code === 0) {
-          try {
-            const parsed: unknown = JSON.parse(stdout);
-            if (
-              parsed &&
-              typeof parsed === "object" &&
-              (parsed as { op?: unknown }).op === "custom_ok"
-            ) {
-              resolve(true);
-              return;
-            }
-          } catch {
-            // Fall through to false.
-          }
+      proc.on("close", (code) => {
+        if (code !== 0) {
+          finish(false);
+          return;
         }
-        resolve(false);
-      };
-      proc.on("close", (code) => finish(code));
-      proc.on("error", () => resolve(false));
+        try {
+          const result = JSON.parse(stdout) as { op?: unknown };
+          finish(result.op === "custom_ok");
+        } catch {
+          finish(false);
+        }
+      });
+      proc.on("error", () => finish(false));
     });
+  }
+
+  function execControlSend(
+    controller: string,
+    payload: ControlResponse,
+  ): Promise<boolean> {
+    return execControlBridge(controller, payload);
   }
 
   const controlControllerHost: ControlControllerHost = {
@@ -1281,46 +1304,7 @@ export default function (pi: ExtensionAPI) {
     payload: ControlWireRequest,
   ): Promise<boolean> {
     if (!listenerReady || !currentConnection) return Promise.resolve(false);
-    return new Promise((resolve) => {
-      const scripts = currentScripts();
-      if (scripts.unavailableMessage) {
-        resolve(false);
-        return;
-      }
-      const proc = spawnChildProcess(
-        scripts.pi,
-        ["control-send", "--name", currentConnection.name],
-        {
-          stdio: ["pipe", "pipe", "pipe"],
-          shell: false,
-          env: interAgentEnv(),
-        },
-      );
-      let stdout = "";
-      proc.stdout?.on("data", (d: Buffer) => {
-        stdout += d.toString();
-      });
-      proc.stdin?.end(
-        JSON.stringify({
-          custom_type: CONTROL_CUSTOM_TYPE,
-          payload,
-          to: target,
-        }) + "\n",
-      );
-      proc.on("close", (code) => {
-        if (code !== 0) {
-          resolve(false);
-          return;
-        }
-        try {
-          const result = JSON.parse(stdout) as { op?: unknown };
-          resolve(result.op === "custom_ok");
-        } catch {
-          resolve(false);
-        }
-      });
-      proc.on("error", () => resolve(false));
-    });
+    return execControlBridge(target, payload);
   }
 
   const controlHost: ControlHost = {

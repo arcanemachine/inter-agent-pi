@@ -171,6 +171,7 @@ class ControllerHost implements ControlControllerHost {
   timers: { fn: () => void; cancelled: boolean }[] = [];
   onSubmit: ((payload: ControlWireRequest, target: string) => void) | null =
     null;
+  neverSubmit = false;
   isListenerReady(): boolean {
     return this.ready;
   }
@@ -180,6 +181,7 @@ class ControllerHost implements ControlControllerHost {
   ): Promise<boolean> {
     this.requests.push({ target, payload });
     this.onSubmit?.(payload, target);
+    if (this.neverSubmit) return new Promise<boolean>(() => {});
     return Promise.resolve(true);
   }
   isIdle(): boolean {
@@ -267,6 +269,17 @@ test("controller registers before submission and returns accepted without waitin
   assert.equal(host.results.length, 0);
 });
 
+test("controller returns within the bound when local submission never resolves", async () => {
+  const host = new ControllerHost();
+  host.neverSubmit = true;
+  const controller = new ControlController(host);
+  const timed = controller.execute("worker-a", "prompt", "hello", "hung-1");
+  host.fireTimers();
+  const result = await timed;
+  assert.match(result.content[0].text, /unknown/);
+  assert.match(result.content[0].text, /do not retry automatically/);
+});
+
 test("controller returns pre-accept rejection and explicit unknown-outcome timeout wording", async () => {
   const host = new ControllerHost();
   const controller = new ControlController(host);
@@ -305,6 +318,75 @@ test("controller returns pre-accept rejection and explicit unknown-outcome timeo
   assert.match(timeout.content[0].text, /unknown/);
   assert.match(timeout.content[0].text, /do not retry automatically/);
   assert.equal(CONTROL_INITIAL_ACK_TIMEOUT_MS, 5000);
+});
+
+test("late state terminal after timeout is delivered exactly once", async () => {
+  const host = new ControllerHost();
+  host.neverSubmit = true;
+  const controller = new ControlController(host);
+  const timed = controller.execute(
+    "worker-a",
+    "state",
+    undefined,
+    "late-state",
+  );
+  host.fireTimers();
+  await timed;
+  host.neverSubmit = false;
+  controller.handleResponse(
+    {
+      kind: "response",
+      id: "late-state",
+      command: "state",
+      phase: "settled",
+      sequence: 1,
+      data: { lifecycle: "idle" },
+      error: null,
+    },
+    "worker-a",
+  );
+  assert.equal(host.results.length, 1);
+  assert.equal(host.results[0].trigger, true);
+  controller.handleResponse(
+    {
+      kind: "response",
+      id: "late-state",
+      command: "state",
+      phase: "settled",
+      sequence: 1,
+      data: { lifecycle: "idle" },
+      error: null,
+    },
+    "worker-a",
+  );
+  assert.equal(host.results.length, 1);
+});
+
+test("mismatched response command cannot resolve or deliver a request", async () => {
+  const host = new ControllerHost();
+  const controller = new ControlController(host);
+  const pending = controller.execute(
+    "worker-a",
+    "prompt",
+    "hello",
+    "command-mismatch",
+  );
+  controller.handleResponse(
+    {
+      kind: "response",
+      id: "command-mismatch",
+      command: "state",
+      phase: "accepted",
+      sequence: 0,
+      data: {},
+      error: null,
+    },
+    "worker-a",
+  );
+  assert.equal(host.notices.length, 0);
+  host.fireTimers();
+  const result = await pending;
+  assert.match(result.content[0].text, /unknown/);
 });
 
 test("state fast path returns terminal response and terminal results coalesce exactly once", async () => {
