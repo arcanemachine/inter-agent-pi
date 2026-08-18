@@ -177,12 +177,11 @@ class FakePi {
     this.messages.push({ message, options });
   }
 
-  submitUserMessage(
+  sendUserMessage(
     text: string,
     options?: { deliverAs?: "steer" | "followUp" },
-  ): Promise<void> {
+  ): void {
     this.userMessages.push({ text, deliverAs: options?.deliverAs });
-    return Promise.resolve();
   }
 
   appendEntry(customType: string, data: unknown): void {
@@ -709,7 +708,7 @@ test("controller command rejects missing text without sending a second identity"
   });
 });
 
-test("a tracked prompt injection reaches submitUserMessage with no delivery override", async () => {
+test("a prompt uses released sendUserMessage with no delivery override", async () => {
   await withExtension(async ({ pi, listeners, controlSends }) => {
     const cmd = interAgentCommand(pi);
     pi.setFlagValue("allow-control-by", "leader");
@@ -733,6 +732,8 @@ test("a tracked prompt injection reaches submitUserMessage with no delivery over
       { text: "injected prompt", deliverAs: undefined },
     ]);
 
+    // Only the released lifecycle event starts the shared activity window.
+    await runHandler(pi, "agent_start");
     // The run settles: agent_settled finalizes the op with the final text.
     await runHandler(pi, "agent_settled");
     // No assistant message was observed in this fake, so the result is

@@ -1359,26 +1359,11 @@ export default function (pi: ExtensionAPI) {
     isStreaming: () => !(currentCtx?.isIdle() ?? true),
     isListenerReady: () => listenerReady,
     selfName: () => currentConnection?.name ?? null,
-    submitUserMessage: (text, deliverAs) => {
-      // Task 3A adds this public API to Pi. Keep the consumer typed against the
-      // additive surface while allowing the older local dev package to report
-      // a bounded admission failure instead of silently falling back to the
-      // untracked legacy sendUserMessage path.
-      const trackedPi = pi as ExtensionAPI & {
-        submitUserMessage?: (
-          content: string,
-          options?: { deliverAs?: "steer" | "followUp" },
-        ) => Promise<void>;
-      };
-      if (typeof trackedPi.submitUserMessage !== "function") {
-        return Promise.reject(
-          new Error("Pi does not expose submitUserMessage admission API"),
-        );
-      }
-      return trackedPi.submitUserMessage(
-        text,
-        deliverAs ? { deliverAs } : undefined,
-      );
+    sendUserMessage: (text, deliverAs) => {
+      // Released Pi exposes fire-and-forget public submission only. Admission
+      // and any asynchronous extension error remain unobservable here; the
+      // control engine correlates only public lifecycle events.
+      pi.sendUserMessage(text, deliverAs ? { deliverAs } : undefined);
     },
     abort: () => currentCtx?.abort(),
     shutdown: () => currentCtx?.shutdown(),

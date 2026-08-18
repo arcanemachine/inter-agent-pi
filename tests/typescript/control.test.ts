@@ -8,6 +8,8 @@ import {
   CONTROL_FINAL_TEXT_MAX_BYTES,
   CONTROL_INJECTED_TEXT_MAX_BYTES,
   CONTROL_RESPONSE_QUEUE_MAX,
+  CONTROL_JOINED_REQUESTS_MAX,
+  CONTROL_PROMPT_START_TIMEOUT_MS,
   ControlController,
   CONTROL_INITIAL_ACK_TIMEOUT_MS,
   ControlEngine,
@@ -20,6 +22,7 @@ import {
 } from "../../src/control.js";
 import type {
   ControlControllerHost,
+  ControlEngineOptions,
   ControlHost,
   ControlResponse,
   ControlWireRequest,
@@ -54,11 +57,11 @@ class FakeHost implements ControlHost {
     deliverAs: "steer" | "followUp" | undefined;
   }[] = [];
   aborts = 0;
+  abortError: Error | null = null;
   shutdowns = 0;
   submitted: { controller: string; payload: ControlResponse }[] = [];
   submitFailures: string[] = [];
-  submitErrors = new Map<string, Error>();
-  admissionGate: Promise<void> | null = null;
+  sendErrors = new Map<string, Error>();
   warnings: string[] = [];
 
   isIdle(): boolean {
@@ -76,17 +79,17 @@ class FakeHost implements ControlHost {
   selfName(): string | null {
     return this.name;
   }
-  submitUserMessage(
+  sendUserMessage(
     text: string,
     deliverAs: "steer" | "followUp" | undefined,
-  ): Promise<void> {
+  ): void {
+    const error = this.sendErrors.get(text);
+    if (error) throw error;
     this.userMessages.push({ text, deliverAs });
-    const error = this.submitErrors.get(text);
-    if (error) return Promise.reject(error);
-    return this.admissionGate ?? Promise.resolve();
   }
   abort(): void {
     this.aborts += 1;
+    if (this.abortError) throw this.abortError;
   }
   shutdown(): void {
     this.shutdowns += 1;
@@ -115,9 +118,10 @@ class FakeHost implements ControlHost {
 function makeEngine(
   host: FakeHost,
   allowControlBy: unknown = "leader,supervisor",
+  options: ControlEngineOptions = {},
 ): { engine: ControlEngine; pi: FakePi } {
   const pi = new FakePi();
-  const engine = new ControlEngine(pi as never, host);
+  const engine = new ControlEngine(pi as never, host, options);
   engine.onSessionStart(undefined, allowControlBy);
   return { engine, pi };
 }
@@ -916,10 +920,13 @@ test("prompt accepts while idle, injects, and settles with final text", async ()
     { text: "write a poem", deliverAs: undefined },
   ]);
   const accepted = host.responsesFor("p1").find((r) => r.phase === "accepted");
-  const started = host.responsesFor("p1").find((r) => r.phase === "started");
   assert.equal(accepted?.sequence, 0);
+  assert.deepEqual(accepted?.data, { submission: "local" });
+  // Only the public lifecycle event establishes the shared activity window.
+  engine.onAgentStart();
+  const started = host.responsesFor("p1").find((r) => r.phase === "started");
   assert.equal(started?.sequence, 1);
-  assert.equal(started?.error, null);
+  assert.deepEqual(started?.data, { attribution: "activity_window" });
 
   engine.observeMessageEnd(
     assistantMessage({ content: [{ type: "text", text: "done" }] }),
@@ -935,22 +942,19 @@ test("prompt accepts while idle, injects, and settles with final text", async ()
   assert.equal(settled?.error, null);
 });
 
-test("submission rejection reports an error without started", async () => {
+test("synchronous public submission failure rejects without accepted", async () => {
   const host = new FakeHost();
-  host.submitErrors.set("blocked", new Error("input was handled"));
+  host.sendErrors.set("blocked", new Error("input was handled"));
   const { engine } = makeEngine(host, "leader");
   send(engine, "leader", request("prompt", { text: "blocked" }, "reject-1"));
   await tick();
   const responses = host.responsesFor("reject-1");
   assert.deepEqual(
     responses.map((response) => response.phase),
-    ["accepted", "rejected"],
+    ["rejected"],
   );
-  assert.equal(responses[1].sequence, 1);
-  assert.equal(responses[1].error?.code, "operation_failed");
-  engine.onAgentSettled();
-  await tick();
-  assert.equal(host.responsesFor("reject-1").length, 2);
+  assert.equal(responses[0].sequence, 0);
+  assert.equal(responses[0].error?.code, "operation_failed");
 });
 
 test("prompt while active or not idle is rejected as busy", () => {
@@ -974,39 +978,95 @@ test("prompt while active or not idle is rejected as busy", () => {
   assert.equal(host.userMessages.length, 1);
 });
 
-test("steer and follow_up require an active run and use the right delivery", async () => {
+test("steer and follow_up join the shared activity window", async () => {
   const host = new FakeHost();
   const { engine } = makeEngine(host, "leader");
 
-  // Idle: steer/follow_up reject with invalid_state advising prompt.
   send(engine, "leader", request("steer", { text: "s" }, "s1"));
   const idleSteer = host.responsesFor("s1").slice(-1)[0];
   assert.equal(idleSteer?.phase, "rejected");
   assert.equal(idleSteer?.error?.code, "invalid_state");
-  assert.ok(idleSteer?.error?.message.includes("prompt"));
 
   host.idle = false;
   send(engine, "leader", request("steer", { text: "s" }, "s2"));
-  await tick();
-  assert.deepEqual(host.userMessages.slice(-1)[0], {
-    text: "s",
-    deliverAs: "steer",
-  });
-
-  // follow_up waits behind the current op: a second op is busy.
   send(engine, "leader", request("follow_up", { text: "f" }, "s3"));
-  assert.equal(host.responsesFor("s3").slice(-1)[0]?.error?.code, "busy");
-
-  // After settlement a fresh follow_up injects with followUp delivery.
+  await tick();
+  assert.deepEqual(host.userMessages, [
+    { text: "s", deliverAs: "steer" },
+    { text: "f", deliverAs: "followUp" },
+  ]);
+  assert.deepEqual(
+    host.responsesFor("s3").map((response) => response.phase),
+    ["accepted"],
+    "queued mutations have no synthesized started phase",
+  );
+  engine.observeMessageEnd(
+    assistantMessage({ content: [{ type: "text", text: "shared" }] }),
+  );
   engine.onAgentSettled();
   await tick();
-  host.idle = false;
-  send(engine, "leader", request("follow_up", { text: "f" }, "s4"));
-  await tick();
-  assert.deepEqual(host.userMessages.slice(-1)[0], {
-    text: "f",
-    deliverAs: "followUp",
-  });
+  assert.equal(host.responsesFor("s2").slice(-1)[0]?.data.text, "shared");
+  assert.equal(host.responsesFor("s3").slice(-1)[0]?.data.text, "shared");
+  assert.equal(
+    host.responsesFor("s3").slice(-1)[0]?.data.attribution,
+    "activity_window",
+  );
+});
+
+test("steer and follow_up on a prompt share terminal output without starts", async () => {
+  const host = new FakeHost();
+  const { engine } = makeEngine(host, "leader,supervisor");
+  send(engine, "leader", request("prompt", { text: "base" }, "base"));
+  engine.onAgentStart();
+  send(engine, "supervisor", request("steer", { text: "steer" }, "steer-1"));
+  send(
+    engine,
+    "supervisor",
+    request("follow_up", { text: "follow" }, "follow-1"),
+  );
+  assert.deepEqual(
+    host.responsesFor("steer-1").map((response) => response.phase),
+    ["accepted"],
+  );
+  assert.deepEqual(
+    host.responsesFor("follow-1").map((response) => response.phase),
+    ["accepted"],
+  );
+  engine.observeMessageEnd(
+    assistantMessage({ content: [{ type: "text", text: "shared" }] }),
+  );
+  engine.onAgentSettled();
+  assert.equal(host.responsesFor("base").slice(-1)[0]?.data.text, "shared");
+  assert.equal(host.responsesFor("steer-1").slice(-1)[0]?.data.text, "shared");
+  assert.equal(host.responsesFor("follow-1").slice(-1)[0]?.data.text, "shared");
+  assert.equal(
+    host.responsesFor("steer-1").slice(-1)[0]?.data.attribution,
+    "activity_window",
+  );
+});
+
+test("shared activity window rejects joins beyond its explicit bound", () => {
+  const host = new FakeHost();
+  const { engine } = makeEngine(host, "leader");
+  send(engine, "leader", request("prompt", { text: "base" }, "base"));
+  engine.onAgentStart();
+  for (let i = 0; i < CONTROL_JOINED_REQUESTS_MAX; i += 1) {
+    send(
+      engine,
+      "leader",
+      request("steer", { text: `steer-${i}` }, `join-${i}`),
+    );
+  }
+  const before = host.userMessages.length;
+  send(
+    engine,
+    "leader",
+    request("follow_up", { text: "overflow" }, "join-overflow"),
+  );
+  const overflow = host.responsesFor("join-overflow").slice(-1)[0];
+  assert.equal(overflow?.phase, "rejected");
+  assert.equal(overflow?.error?.code, "busy");
+  assert.equal(host.userMessages.length, before);
 });
 
 test("state works during active work and returns a privacy-safe payload", () => {
@@ -1096,11 +1156,15 @@ test("abort interrupts an active op and dual-settles at agent_settled", async ()
   const interrupted = host.responsesFor("p1").slice(-1)[0];
   assert.equal(interrupted?.phase, "failed");
   assert.equal(interrupted?.error?.code, "operation_aborted");
-  assert.equal(interrupted?.sequence, 2);
+  assert.equal(interrupted?.sequence, 1);
   const abortDone = host.responsesFor("a1").slice(-1)[0];
   assert.equal(abortDone?.phase, "settled");
   assert.equal(abortDone?.sequence, 2);
-  assert.deepEqual(abortDone?.data, { aborted: true, interleaved: false });
+  assert.deepEqual(abortDone?.data, {
+    aborted: true,
+    attribution: "activity_window",
+    interleaved: false,
+  });
 
   // The engine is idle again for a fresh run-affecting op.
   host.idle = true;
@@ -1126,32 +1190,183 @@ test("abort finalizes immediately when nothing is running after the abort", asyn
   assert.equal(host.aborts, 1);
 });
 
-test("abort during admission is applied after admission and settles the pair", async () => {
+test("fire-and-forget prompt remains bounded when no agent_start is observed", async () => {
   const host = new FakeHost();
-  let release!: () => void;
-  host.admissionGate = new Promise<void>((resolve) => {
-    release = resolve;
-  });
   const { engine } = makeEngine(host, "leader");
-  send(engine, "leader", request("prompt", { text: "gated" }, "gated"));
+  send(
+    engine,
+    "leader",
+    request("prompt", { text: "hidden failure" }, "unknown"),
+  );
   await tick();
-  send(engine, "leader", request("abort", {}, "gated-abort"));
-  assert.equal(host.aborts, 0);
-  host.idle = false;
-  release();
-  await tick();
-  assert.equal(host.aborts, 1);
-  assert.equal(
-    host.responsesFor("gated").some((r) => r.phase === "started"),
-    true,
+  assert.deepEqual(
+    host.responsesFor("unknown").map((response) => response.phase),
+    ["accepted"],
   );
   engine.onAgentSettled();
+  const terminal = host.responsesFor("unknown").slice(-1)[0];
+  assert.equal(terminal?.phase, "failed");
+  assert.equal(terminal?.data.unknownOutcome, true);
+  assert.match(terminal?.error?.message ?? "", /unknown/);
+  assert.match(terminal?.error?.message ?? "", /do not retry automatically/);
+});
+
+test("prompt start deadline produces one bounded unknown outcome and ignores late start", async () => {
+  const host = new FakeHost();
+  let deadline: (() => void) | null = null;
+  let delay = -1;
+  let cancelled = 0;
+  const { engine } = makeEngine(host, "leader", {
+    schedule: (fn, ms) => {
+      deadline = fn;
+      delay = ms;
+      return () => {
+        cancelled += 1;
+      };
+    },
+  });
+  send(engine, "leader", request("prompt", { text: "hidden" }, "deadline"));
   await tick();
-  assert.equal(
-    host.responsesFor("gated").slice(-1)[0]?.error?.code,
-    "operation_aborted",
+  assert.equal(delay, CONTROL_PROMPT_START_TIMEOUT_MS);
+  assert.ok(deadline);
+  assert.deepEqual(
+    host.responsesFor("deadline").map((response) => response.phase),
+    ["accepted"],
   );
-  assert.equal(host.responsesFor("gated-abort").slice(-1)[0]?.phase, "settled");
+  deadline?.();
+  const terminal = host.responsesFor("deadline").slice(-1)[0];
+  assert.equal(terminal?.phase, "failed");
+  assert.equal(terminal?.data.unknownOutcome, true);
+  assert.match(terminal?.error?.message ?? "", /do not retry automatically/);
+  assert.equal(cancelled, 0, "the fired deadline has already cleared itself");
+
+  // A late lifecycle event cannot reopen or add a second terminal result.
+  engine.onAgentStart();
+  engine.onAgentSettled();
+  assert.equal(host.responsesFor("deadline").length, 2);
+});
+
+test("pre-start abort has bounded unknown results when no activity starts", async () => {
+  const host = new FakeHost();
+  let deadline: (() => void) | null = null;
+  const { engine } = makeEngine(host, "leader", {
+    schedule: (fn) => {
+      deadline = fn;
+      return () => {};
+    },
+  });
+  send(engine, "leader", request("prompt", { text: "unknown" }, "unknown-run"));
+  send(engine, "leader", request("abort", {}, "unknown-abort"));
+  assert.equal(host.aborts, 1, "abort is invoked exactly once");
+  assert.deepEqual(
+    host.responsesFor("unknown-abort").map((response) => response.phase),
+    ["accepted", "started"],
+  );
+  deadline?.();
+  const run = host.responsesFor("unknown-run").slice(-1)[0];
+  const abort = host.responsesFor("unknown-abort").slice(-1)[0];
+  assert.equal(run?.phase, "failed");
+  assert.equal(run?.data.unknownOutcome, true);
+  assert.equal(run?.data.aborted, false);
+  assert.equal(run?.error?.code, "operation_failed");
+  assert.equal(abort?.phase, "failed");
+  assert.equal(abort?.data.unknownOutcome, true);
+  assert.equal(abort?.data.aborted, false);
+  assert.match(abort?.error?.message ?? "", /do not retry automatically/);
+});
+
+test("pre-start abort does not misreport a later normal activity window", async () => {
+  const host = new FakeHost();
+  let cancelled = 0;
+  const { engine } = makeEngine(host, "leader,supervisor", {
+    schedule: () => () => {
+      cancelled += 1;
+    },
+  });
+  send(engine, "leader", request("prompt", { text: "normal" }, "normal-run"));
+  send(engine, "leader", request("abort", {}, "early-abort"));
+  assert.equal(host.aborts, 1, "the pre-start abort is invoked once");
+  assert.deepEqual(
+    host.responsesFor("early-abort").map((response) => response.phase),
+    ["accepted", "started"],
+  );
+  engine.onAgentStart();
+  assert.equal(cancelled, 1);
+  host.idle = false;
+  send(engine, "supervisor", request("abort", {}, "later-abort"));
+  assert.equal(host.aborts, 2, "a later distinct abort is a new manual action");
+  assert.deepEqual(
+    host.responsesFor("later-abort").map((response) => response.phase),
+    ["accepted", "started"],
+  );
+  engine.observeMessageEnd(
+    assistantMessage({ content: [{ type: "text", text: "normal" }] }),
+  );
+
+  engine.onAgentSettled();
+  const normal = host.responsesFor("normal-run").slice(-1)[0];
+  const abort = host.responsesFor("early-abort").slice(-1)[0];
+  const laterAbort = host.responsesFor("later-abort").slice(-1)[0];
+  assert.equal(normal?.phase, "settled");
+  assert.equal(normal?.data.text, "normal");
+  assert.notEqual(normal?.error?.code, "operation_aborted");
+  assert.equal(abort?.phase, "settled");
+  assert.equal(abort?.data.aborted, false);
+  assert.equal(abort?.error, null);
+  assert.equal(laterAbort?.phase, "settled");
+  assert.equal(laterAbort?.data.aborted, false);
+});
+
+test("rejected pre-start abort does not poison later post-start abort classification", () => {
+  const host = new FakeHost();
+  host.abortError = new Error("abort unavailable");
+  const { engine } = makeEngine(host, "leader,supervisor");
+  send(engine, "leader", request("prompt", { text: "run" }, "run"));
+  send(engine, "leader", request("abort", {}, "rejected-abort"));
+  const rejected = host.responsesFor("rejected-abort").slice(-1)[0];
+  assert.deepEqual(
+    host.responsesFor("rejected-abort").map((response) => response.phase),
+    ["rejected"],
+  );
+  assert.equal(rejected?.error?.code, "operation_failed");
+
+  host.abortError = null;
+  engine.onAgentStart();
+  host.idle = false;
+  send(engine, "supervisor", request("abort", {}, "post-start-abort"));
+  assert.equal(host.aborts, 2);
+  assert.deepEqual(
+    host.responsesFor("post-start-abort").map((response) => response.phase),
+    ["accepted", "started"],
+  );
+  engine.observeMessageEnd(assistantMessage({ stopReason: "aborted" }));
+  engine.onAgentSettled();
+
+  const run = host.responsesFor("run").slice(-1)[0];
+  const postStart = host.responsesFor("post-start-abort").slice(-1)[0];
+  assert.equal(run?.phase, "failed");
+  assert.equal(run?.error?.code, "operation_aborted");
+  assert.equal(run?.data.attribution, "activity_window");
+  assert.equal(postStart?.phase, "settled");
+  assert.equal(postStart?.data.aborted, true);
+  assert.equal(postStart?.data.attribution, "activity_window");
+});
+
+test("observed prompt start cancels the deterministic deadline", async () => {
+  const host = new FakeHost();
+  let cancelled = 0;
+  const { engine } = makeEngine(host, "leader", {
+    schedule: () => () => {
+      cancelled += 1;
+    },
+  });
+  send(engine, "leader", request("prompt", { text: "starts" }, "starts"));
+  await tick();
+  engine.onAgentStart();
+  assert.equal(cancelled, 1);
+  engine.observeMessageEnd(assistantMessage());
+  engine.onAgentSettled();
+  assert.equal(host.responsesFor("starts").slice(-1)[0]?.phase, "settled");
 });
 
 test("abort is serialized against a pending standalone abort", async () => {
@@ -1261,19 +1476,16 @@ test("two aborts settle both abort requests at the pair finalize", async () => {
 
 // ── Interleaving ────────────────────────────────────────────────────────────
 
-test("human and unrelated extension input mark the result interleaved; fromSelf distinguishes identical text", async () => {
+test("interactive/RPC input is observable while extension provenance remains unknown", async () => {
   const host = new FakeHost();
   const { engine, pi } = makeEngine(host, "leader");
   send(engine, "leader", request("prompt", { text: "guarded text" }, "p1"));
   await tick();
   assert.equal(host.userMessages.length, 1);
+  engine.onAgentStart();
 
-  // The host marks the submitting extension's own input with fromSelf.
-  pi.fire("input", {
-    text: "guarded text",
-    source: "extension",
-    fromSelf: true,
-  });
+  // Released Pi gives no extension-origin attribution; this remains unknown.
+  pi.fire("input", { text: "guarded text", source: "extension" });
   engine.observeMessageEnd(assistantMessage());
   engine.onAgentSettled();
   assert.equal(
@@ -1285,6 +1497,7 @@ test("human and unrelated extension input mark the result interleaved; fromSelf 
   // Interactive and rpc input mark interleaved.
   send(engine, "leader", request("prompt", { text: "again" }, "p2"));
   await tick();
+  engine.onAgentStart();
   pi.fire("input", { text: "human typing", source: "interactive" });
   engine.observeMessageEnd(assistantMessage());
   engine.onAgentSettled();
@@ -1296,6 +1509,7 @@ test("human and unrelated extension input mark the result interleaved; fromSelf 
 
   send(engine, "leader", request("prompt", { text: "again2" }, "p3"));
   await tick();
+  engine.onAgentStart();
   pi.fire("input", { text: "rpc input", source: "rpc" });
   engine.observeMessageEnd(assistantMessage());
   engine.onAgentSettled();
@@ -1305,16 +1519,17 @@ test("human and unrelated extension input mark the result interleaved; fromSelf 
     true,
   );
 
-  // Unrelated extension input, even with identical text, is interleaving.
+  // Extension input is not distinguishable from this extension's own input.
   send(engine, "leader", request("prompt", { text: "mine" }, "p4"));
   await tick();
-  pi.fire("input", { text: "mine", source: "extension", fromSelf: false });
+  engine.onAgentStart();
+  pi.fire("input", { text: "mine", source: "extension" });
   engine.observeMessageEnd(assistantMessage());
   engine.onAgentSettled();
   assert.equal(
     host.responsesFor("p4").find((r) => r.phase === "settled")?.data
       .interleaved,
-    true,
+    false,
   );
 });
 
@@ -1395,6 +1610,7 @@ test("assistant error and no-text settle honestly at agent_settled", async () =>
   const { engine } = makeEngine(host, "leader");
   send(engine, "leader", request("prompt", { text: "x" }, "p1"));
   await tick();
+  engine.onAgentStart();
   engine.observeMessageEnd(
     assistantMessage({ stopReason: "error", errorMessage: "model failed" }),
   );
@@ -1406,6 +1622,7 @@ test("assistant error and no-text settle honestly at agent_settled", async () =>
 
   send(engine, "leader", request("prompt", { text: "x" }, "p2"));
   await tick();
+  engine.onAgentStart();
   engine.observeMessageEnd(assistantMessage({ content: [] }));
   engine.onAgentSettled();
   const noText = host.responsesFor("p2").slice(-1)[0];
@@ -1423,6 +1640,7 @@ test("duplicate id replays the latest status without executing again", async () 
   send(engine, "leader", request("prompt", { text: "x" }, "p1"));
   await tick();
   assert.equal(host.userMessages.length, 1);
+  engine.onAgentStart();
 
   // Same controller + same id mid-flight: replay latest status (started).
   send(engine, "leader", request("prompt", { text: "different" }, "p1"));
@@ -1506,6 +1724,7 @@ test("responses queue while the listener is unavailable and flush on welcome", a
   host.name = null;
   send(engine, "leader", request("prompt", { text: "x" }, "p1"));
   await tick();
+  engine.onAgentStart();
   assert.equal(host.submitted.length, 0, "no submissions while unready");
 
   // Welcome makes the bridge ready; the queued responses flush in order.

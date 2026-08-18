@@ -40,6 +40,8 @@ export const CONTROL_ERROR_CODE_MAX = 64;
 export const CONTROL_DEDUP_PER_SENDER = 256;
 export const CONTROL_RESPONSE_QUEUE_MAX = 256;
 export const CONTROL_ABORT_REQUESTS_MAX = 256;
+export const CONTROL_JOINED_REQUESTS_MAX = 256;
+export const CONTROL_PROMPT_START_TIMEOUT_MS = 5000;
 export const CONTROL_INITIAL_ACK_TIMEOUT_MS = 5000;
 export const CONTROL_PENDING_REQUESTS_MAX = 256;
 export const CONTROL_RESULT_CUSTOM_TYPE = "inter-agent-control-result";
@@ -576,7 +578,7 @@ export function describeFinalAssistant(message: unknown): FinalOutcome {
 
 /**
  * Runtime facts and actions the engine needs from the Pi extension. All
- * agent/abort/shutdown interaction uses public Pi extension APIs; the
+ * agent/abort/shutdown interaction uses released public Pi extension APIs; the
  * implementation in `src/index.ts` owns the real wiring.
  */
 export interface ControlHost {
@@ -585,11 +587,11 @@ export interface ControlHost {
   isStreaming(): boolean;
   isListenerReady(): boolean;
   selfName(): string | null;
-  /** Resolve only after Pi admits/enqueues the input; reject before run start otherwise. */
-  submitUserMessage(
+  /** Fire-and-forget public Pi submission; admission is not observable here. */
+  sendUserMessage(
     text: string,
     deliverAs: "steer" | "followUp" | undefined,
-  ): Promise<void>;
+  ): void;
   abort(): void;
   shutdown(): void;
   /** Send one response over the target's persistent connection. Returns true only for a local `submitted` ack. */
@@ -598,6 +600,12 @@ export interface ControlHost {
     payload: ControlResponse,
   ): Promise<boolean>;
   notifyWarning(body: string): void;
+}
+
+export interface ControlEngineOptions {
+  /** Injectable timer seam for deterministic lifecycle tests. */
+  schedule?: (fn: () => void, ms: number) => () => void;
+  promptStartTimeoutMs?: number;
 }
 
 export interface ControlControllerHost {
@@ -974,27 +982,51 @@ interface AbortRecord {
   /** Next response sequence for this abort request. */
   sequence: number;
   started: boolean;
+  /** Whether this manual abort preceded the observed activity window. */
+  beforeWindowStart: boolean;
 }
 
 interface StandaloneAbortOperation {
   requests: AbortRecord[];
   abortApplied: boolean;
+  settledPending: boolean;
 }
 
-interface ActiveOperation {
+interface ActivityRequest {
   id: string;
   command: ControlCommand;
   controller: string;
-  /** Next response sequence (0 accepted, 1 started, 2 terminal). */
+  /** Next response sequence after accepted (or started for the prompt). */
   sequence: number;
-  /** True while the public submission promise is awaiting admission. */
-  admissionPending: boolean;
-  /** True only after the public submission promise resolves. */
-  admitted: boolean;
-  /** Set when agent_settled arrives before admission resolves. */
+}
+
+interface ActiveOperation {
+  /** The first request opened this shared public activity window. */
+  id: string;
+  command: ControlCommand;
+  controller: string;
+  /** Next response sequence for the primary request. */
+  sequence: number;
+  /** Additional steer/follow_up requests settled against this same window. */
+  joined: ActivityRequest[];
+  /** Number of public actions currently being invoked synchronously. */
+  actionPending: number;
+  /** Set when agent_settled arrives before all local submissions finish. */
   settledPending: boolean;
-  /** Prevent duplicate abort calls when admission was initially pending. */
+  /** True after the public abort action has been invoked. */
   abortApplied: boolean;
+  /** True when the first abort was requested before the activity window start. */
+  preStartAbort: boolean;
+  /** True after one manual abort has been invoked after activity started. */
+  postStartAbortApplied: boolean;
+  /** True after the next associated public agent_start was observed. */
+  windowStarted: boolean;
+  /** Prevent duplicate prompt started responses. */
+  startedSent: boolean;
+  /** True if lifecycle events arrived during the public action call. */
+  startObserved: boolean;
+  /** Cancel handle for the bounded prompt-start deadline. */
+  startTimerCancel: (() => void) | null;
   interleaved: boolean;
   candidateFinal: unknown;
   abortRequests: AbortRecord[];
@@ -1019,31 +1051,45 @@ export class ControlEngine {
   private standaloneAbort: StandaloneAbortOperation | null = null;
   private dedup = new Map<string, Map<string, DedupRecord>>();
   private responseQueue: QueuedResponse[] = [];
-  /** Bumped on cleanup so late async submission callbacks cannot requeue. */
+  /** Bumped on cleanup so late lifecycle callbacks cannot requeue state. */
   private generation = 0;
+  /** Defers lifecycle settlement/start responses across synchronous public calls. */
+  private actionDepth = 0;
+  private readonly schedule: (fn: () => void, ms: number) => () => void;
+  private readonly promptStartTimeoutMs: number;
 
   constructor(
     private readonly pi: ExtensionAPI,
     private readonly host: ControlHost,
+    options: ControlEngineOptions = {},
   ) {
-    // Observe run lifecycle and input through public Pi events. `agent_settled`
-    // is the single terminal settle authority (after retries, compaction, and
-    // queued continuations); index.ts registers its own mailbox settle handler
-    // independently.
+    this.schedule =
+      options.schedule ??
+      ((fn, ms) => {
+        const timer = setTimeout(fn, ms);
+        timer.unref?.();
+        return () => clearTimeout(timer);
+      });
+    this.promptStartTimeoutMs =
+      options.promptStartTimeoutMs ?? CONTROL_PROMPT_START_TIMEOUT_MS;
+    // Observe run lifecycle and input through released public Pi events.
+    // `agent_settled` is the single terminal settle authority (after retries,
+    // compaction, and queued continuations); index.ts registers its own
+    // mailbox settle handler independently.
+    pi.on("agent_start", () => {
+      this.onAgentStart();
+    });
     pi.on("agent_end", (event: { messages: unknown[] }) => {
       this.observeAgentEnd(event.messages);
     });
     pi.on("message_end", (event: { message: unknown }) => {
       this.observeMessageEnd(event.message);
     });
-    pi.on(
-      "input",
-      (event: { text: string; source: string; fromSelf?: boolean }) => {
-        // `fromSelf` is the public Pi origin contract. Never infer origin from
-        // source, text, timing, or any payload marker.
-        this.onInput(event.text, event.source, event.fromSelf === true);
-      },
-    );
+    pi.on("input", (event: { text: string; source: string }) => {
+      // Released Pi exposes only source and text. Interactive/RPC input is
+      // observable interleaving; extension provenance remains unknown.
+      this.onInput(event.text, event.source);
+    });
     pi.on("agent_settled", () => {
       this.onAgentSettled();
     });
@@ -1063,6 +1109,7 @@ export class ControlEngine {
   ): { ok: boolean; message?: string } {
     this.generation += 1;
     this.shuttingDown = false;
+    this.cancelPromptStartDeadline(this.active);
     this.active = null;
     this.standaloneAbort = null;
     this.dedup.clear();
@@ -1231,19 +1278,29 @@ export class ControlEngine {
       );
       return;
     }
-    if (this.active !== null || this.standaloneAbort !== null) {
+    if (this.standaloneAbort !== null) {
       this.emitRejection(
         fromName,
         request.id,
         request.command,
         "busy",
-        "another remote operation is already active",
+        "an abort operation is already active",
       );
       return;
     }
-    const runActive = !this.host.isIdle() || this.host.hasPendingMessages();
+
     if (request.command === "prompt") {
-      if (runActive) {
+      if (this.active !== null) {
+        this.emitRejection(
+          fromName,
+          request.id,
+          request.command,
+          "busy",
+          "another remote activity window is already active",
+        );
+        return;
+      }
+      if (!this.isFullyIdle()) {
         this.emitRejection(
           fromName,
           request.id,
@@ -1253,7 +1310,46 @@ export class ControlEngine {
         );
         return;
       }
-    } else if (!runActive) {
+      const operation = this.newOperation(fromName, request, false);
+      this.active = operation;
+      this.invokeSubmission(operation, request, undefined, null, fromName);
+      return;
+    }
+
+    // A steer/follow_up joins the currently active public activity window. If
+    // human work is already running, it opens a shared window anchored to that
+    // observed run; Pi exposes no distinct public start for the mutation.
+    if (this.active !== null) {
+      if (!this.active.windowStarted) {
+        this.emitRejection(
+          fromName,
+          request.id,
+          request.command,
+          "busy",
+          "the remote activity window has not started",
+        );
+        return;
+      }
+      if (this.active.joined.length >= CONTROL_JOINED_REQUESTS_MAX) {
+        this.emitRejection(
+          fromName,
+          request.id,
+          request.command,
+          "busy",
+          "the shared activity window has reached its request limit",
+        );
+        return;
+      }
+      this.invokeSubmission(
+        this.active,
+        request,
+        request.command === "steer" ? "steer" : "followUp",
+        this.active,
+        fromName,
+      );
+      return;
+    }
+    if (this.isFullyIdle()) {
       this.emitRejection(
         fromName,
         request.id,
@@ -1263,52 +1359,167 @@ export class ControlEngine {
       );
       return;
     }
-
-    this.sendResponse(
+    const operation = this.newOperation(fromName, request, true);
+    this.active = operation;
+    this.invokeSubmission(
+      operation,
+      request,
+      request.command === "steer" ? "steer" : "followUp",
+      null,
       fromName,
-      this.buildResponse(request.id, request.command, "accepted", 0, {}, null),
-      true,
     );
-    const deliverAs =
-      request.command === "prompt"
-        ? undefined
-        : request.command === "steer"
-          ? "steer"
-          : "followUp";
-    const operation: ActiveOperation = {
+  }
+
+  private newOperation(
+    fromName: string,
+    request: ControlRequest,
+    windowAlreadyStarted: boolean,
+  ): ActiveOperation {
+    return {
       id: request.id,
       command: request.command,
       controller: fromName,
       sequence: 1,
-      admissionPending: true,
-      admitted: false,
+      joined: [],
+      actionPending: 0,
       settledPending: false,
       abortApplied: false,
+      preStartAbort: false,
+      postStartAbortApplied: false,
+      windowStarted: windowAlreadyStarted,
+      startedSent: windowAlreadyStarted || request.command !== "prompt",
+      startObserved: windowAlreadyStarted,
+      startTimerCancel: null,
       interleaved: false,
       candidateFinal: null,
       abortRequests: [],
     };
-    // Reserve the operation before entering Pi's asynchronous input pipeline.
-    // This serializes concurrent remote injections even while admission is
-    // pending, while `submitUserMessage` itself remains the only admission
-    // authority.
-    this.active = operation;
-    let admission: Promise<void>;
-    try {
-      admission = this.host.submitUserMessage(request.text ?? "", deliverAs);
-    } catch (error) {
-      admission = Promise.reject(error);
-    }
-    void admission.then(
-      () => this.onSubmissionAdmitted(operation),
-      (error: unknown) => this.onSubmissionRejected(operation, error),
-    );
   }
 
-  private onSubmissionAdmitted(operation: ActiveOperation): void {
-    if (this.active !== operation) return;
-    operation.admissionPending = false;
-    operation.admitted = true;
+  /** Invoke released fire-and-forget sendUserMessage and then report local submission. */
+  private invokeSubmission(
+    operation: ActiveOperation,
+    request: ControlRequest,
+    deliverAs: "steer" | "followUp" | undefined,
+    existingOperation: ActiveOperation | null,
+    fromName: string,
+  ): void {
+    const joined = existingOperation !== null;
+    const record: ActivityRequest = {
+      id: request.id,
+      command: request.command,
+      controller: fromName,
+      sequence: 1,
+    };
+    if (joined) {
+      operation.joined.push(record);
+    }
+    operation.actionPending += 1;
+    this.actionDepth += 1;
+    let thrown: unknown = null;
+    try {
+      this.host.sendUserMessage(request.text ?? "", deliverAs);
+    } catch (error) {
+      thrown = error;
+    } finally {
+      this.actionDepth -= 1;
+      operation.actionPending -= 1;
+    }
+
+    if (thrown !== null) {
+      if (joined) {
+        operation.joined = operation.joined.filter((entry) => entry !== record);
+      } else if (this.active === operation) {
+        this.clearActive();
+      }
+      const message = truncateUtf8(
+        thrown instanceof Error
+          ? thrown.message
+          : typeof thrown === "string"
+            ? thrown
+            : "Pi did not accept the control action",
+        CONTROL_ERROR_MESSAGE_MAX_BYTES,
+      );
+      this.emitRejection(
+        fromName,
+        request.id,
+        request.command,
+        "operation_failed",
+        message || "Pi did not accept the control action",
+      );
+      if (joined) this.flushDeferredLifecycle(operation);
+      return;
+    }
+
+    this.sendResponse(
+      fromName,
+      this.buildResponse(
+        request.id,
+        request.command,
+        "accepted",
+        0,
+        { submission: "local" },
+        null,
+      ),
+      true,
+    );
+    if (!joined && request.command === "prompt") {
+      this.armPromptStartDeadline(operation);
+    }
+    this.flushDeferredLifecycle(operation);
+  }
+
+  private armPromptStartDeadline(operation: ActiveOperation): void {
+    if (
+      this.active !== operation ||
+      operation.command !== "prompt" ||
+      operation.windowStarted ||
+      operation.startTimerCancel !== null
+    ) {
+      return;
+    }
+    const generation = this.generation;
+    operation.startTimerCancel = this.schedule(() => {
+      operation.startTimerCancel = null;
+      if (
+        this.active !== operation ||
+        generation !== this.generation ||
+        operation.windowStarted
+      ) {
+        return;
+      }
+      this.finalizeUnknownOutcome(operation);
+    }, this.promptStartTimeoutMs);
+  }
+
+  private cancelPromptStartDeadline(operation: ActiveOperation | null): void {
+    if (!operation?.startTimerCancel) return;
+    const cancel = operation.startTimerCancel;
+    operation.startTimerCancel = null;
+    cancel();
+  }
+
+  private flushDeferredLifecycle(operation: ActiveOperation): void {
+    if (this.active !== operation || this.actionDepth !== 0) return;
+    if (operation.startObserved && !operation.startedSent) {
+      this.emitActivityStarted(operation);
+    }
+    if (operation.settledPending && operation.actionPending === 0) {
+      operation.settledPending = false;
+      this.onAgentSettled();
+    }
+  }
+
+  private emitActivityStarted(operation: ActiveOperation): void {
+    if (
+      this.active !== operation ||
+      operation.startedSent ||
+      operation.command !== "prompt" ||
+      !operation.windowStarted
+    ) {
+      return;
+    }
+    operation.startedSent = true;
     this.sendResponse(
       operation.controller,
       this.buildResponse(
@@ -1316,67 +1527,11 @@ export class ControlEngine {
         operation.command,
         "started",
         operation.sequence++,
-        {},
+        { attribution: "activity_window" },
         null,
       ),
       true,
     );
-    if (operation.abortRequests.length > 0 && !operation.abortApplied) {
-      operation.abortApplied = true;
-      this.host.abort();
-      this.startAbortRequests(operation.abortRequests);
-    }
-    if (
-      operation.settledPending ||
-      (operation.abortApplied && this.isFullyIdle())
-    ) {
-      this.finishAfterDeferredSettlement(operation);
-    }
-  }
-
-  private onSubmissionRejected(
-    operation: ActiveOperation,
-    reason: unknown,
-  ): void {
-    if (this.active !== operation) return;
-    operation.admissionPending = false;
-    const reasonText =
-      reason instanceof Error
-        ? reason.message
-        : typeof reason === "string"
-          ? reason
-          : "Pi did not admit the control input";
-    const message = truncateUtf8(reasonText, CONTROL_ERROR_MESSAGE_MAX_BYTES);
-    this.sendResponse(
-      operation.controller,
-      this.buildResponse(
-        operation.id,
-        operation.command,
-        "rejected",
-        operation.sequence++,
-        {},
-        {
-          code: "operation_failed",
-          message: message || "Pi did not admit the control input",
-        },
-      ),
-      true,
-    );
-    for (const abort of operation.abortRequests) {
-      this.sendResponse(
-        abort.controller,
-        this.buildResponse(
-          abort.id,
-          "abort",
-          "settled",
-          abort.sequence++,
-          { aborted: false },
-          null,
-        ),
-        true,
-      );
-    }
-    this.clearActive();
   }
 
   private startAbortRequests(requests: AbortRecord[]): void {
@@ -1414,10 +1569,12 @@ export class ControlEngine {
       controller: fromName,
       sequence: 1,
       started: false,
+      beforeWindowStart: false,
     };
 
     if (this.active !== null) {
-      if (this.active.abortRequests.length >= CONTROL_ABORT_REQUESTS_MAX) {
+      const operation = this.active;
+      if (operation.abortRequests.length >= CONTROL_ABORT_REQUESTS_MAX) {
         this.emitRejection(
           fromName,
           request.id,
@@ -1427,30 +1584,73 @@ export class ControlEngine {
         );
         return;
       }
-      this.active.abortRequests.push(record);
+      record.beforeWindowStart = !operation.windowStarted;
+      if (record.beforeWindowStart) operation.preStartAbort = true;
+      operation.abortRequests.push(record);
+      const invokeAbort = record.beforeWindowStart
+        ? !operation.abortApplied
+        : !operation.postStartAbortApplied;
+      let thrown: unknown = null;
+      if (invokeAbort) {
+        this.actionDepth += 1;
+        try {
+          this.host.abort();
+          if (record.beforeWindowStart) {
+            operation.abortApplied = true;
+          } else {
+            operation.postStartAbortApplied = true;
+          }
+        } catch (error) {
+          thrown = error;
+        } finally {
+          this.actionDepth -= 1;
+        }
+      }
+      if (thrown !== null) {
+        operation.abortRequests = operation.abortRequests.filter(
+          (entry) => entry !== record,
+        );
+        operation.preStartAbort = operation.abortRequests.some(
+          (entry) => entry.beforeWindowStart,
+        );
+        this.emitRejection(
+          fromName,
+          request.id,
+          request.command,
+          "operation_failed",
+          thrown instanceof Error
+            ? truncateUtf8(thrown.message, CONTROL_ERROR_MESSAGE_MAX_BYTES)
+            : "Pi did not accept the abort action",
+        );
+        return;
+      }
       this.sendResponse(
         fromName,
-        this.buildResponse(request.id, "abort", "accepted", 0, {}, null),
+        this.buildResponse(
+          request.id,
+          "abort",
+          "accepted",
+          0,
+          { submission: "local" },
+          null,
+        ),
         true,
       );
-      // Admission must win the race: a pending submitUserMessage can still be
-      // rejected or reserved, so apply abort only after it has resolved.
-      if (!this.active.admissionPending && !this.active.abortApplied) {
-        this.active.abortApplied = true;
-        this.host.abort();
-      }
-      if (this.active.abortApplied) {
-        this.startAbortRequests(this.active.abortRequests);
-      }
-      const operation = this.active;
-      if (operation !== null && operation.abortApplied && this.isFullyIdle()) {
+      this.startAbortRequests(operation.abortRequests);
+      this.flushDeferredLifecycle(operation);
+      if (
+        this.active === operation &&
+        operation.windowStarted &&
+        this.isFullyIdle()
+      ) {
         this.finalizeAbortPair();
       }
       return;
     }
 
     if (this.standaloneAbort !== null) {
-      if (this.standaloneAbort.requests.length >= CONTROL_ABORT_REQUESTS_MAX) {
+      const standalone = this.standaloneAbort;
+      if (standalone.requests.length >= CONTROL_ABORT_REQUESTS_MAX) {
         this.emitRejection(
           fromName,
           request.id,
@@ -1460,20 +1660,17 @@ export class ControlEngine {
         );
         return;
       }
-      this.standaloneAbort.requests.push(record);
+      standalone.requests.push(record);
       this.sendResponse(
         fromName,
         this.buildResponse(request.id, "abort", "accepted", 0, {}, null),
         true,
       );
-      if (!this.standaloneAbort.abortApplied) {
-        this.standaloneAbort.abortApplied = true;
-        this.host.abort();
+      this.startAbortRequests(standalone.requests);
+      if (standalone.settledPending && this.actionDepth === 0) {
+        standalone.settledPending = false;
+        this.finalizeStandaloneAbort();
       }
-      if (this.standaloneAbort.abortApplied) {
-        this.startAbortRequests(this.standaloneAbort.requests);
-      }
-      if (this.isFullyIdle()) this.finalizeStandaloneAbort();
       return;
     }
 
@@ -1494,16 +1691,52 @@ export class ControlEngine {
       return;
     }
 
-    this.standaloneAbort = { requests: [record], abortApplied: false };
+    const standalone: StandaloneAbortOperation = {
+      requests: [record],
+      abortApplied: false,
+      settledPending: false,
+    };
+    this.standaloneAbort = standalone;
+    let thrown: unknown = null;
+    this.actionDepth += 1;
+    try {
+      this.host.abort();
+      standalone.abortApplied = true;
+    } catch (error) {
+      thrown = error;
+    } finally {
+      this.actionDepth -= 1;
+    }
+    if (thrown !== null) {
+      this.standaloneAbort = null;
+      this.emitRejection(
+        fromName,
+        request.id,
+        request.command,
+        "operation_failed",
+        thrown instanceof Error
+          ? truncateUtf8(thrown.message, CONTROL_ERROR_MESSAGE_MAX_BYTES)
+          : "Pi did not accept the abort action",
+      );
+      return;
+    }
     this.sendResponse(
       fromName,
-      this.buildResponse(request.id, "abort", "accepted", 0, {}, null),
+      this.buildResponse(
+        request.id,
+        "abort",
+        "accepted",
+        0,
+        { submission: "local" },
+        null,
+      ),
       true,
     );
-    this.standaloneAbort.abortApplied = true;
-    this.host.abort();
-    this.startAbortRequests(this.standaloneAbort.requests);
-    if (this.isFullyIdle()) this.finalizeStandaloneAbort();
+    this.startAbortRequests(standalone.requests);
+    if (standalone.settledPending && this.actionDepth === 0) {
+      standalone.settledPending = false;
+      this.finalizeStandaloneAbort();
+    }
   }
 
   private isFullyIdle(): boolean {
@@ -1584,13 +1817,28 @@ export class ControlEngine {
 
   // ── Run lifecycle ─────────────────────────────────────────────────────────
 
+  /** The next public agent_start opens the prompt's shared activity window. */
+  onAgentStart(): void {
+    const op = this.active;
+    if (!op) return;
+    this.cancelPromptStartDeadline(op);
+    if (op.preStartAbort) {
+      // The pre-start invocation is no longer an active-window application;
+      // observing start never invokes abort again.
+      op.abortApplied = false;
+    }
+    op.windowStarted = true;
+    op.startObserved = true;
+    if (this.actionDepth === 0) this.flushDeferredLifecycle(op);
+  }
+
   observeMessageEnd(message: unknown): void {
-    if (!this.active) return;
+    if (!this.active?.windowStarted) return;
     if (isAssistantMessage(message)) this.active.candidateFinal = message;
   }
 
   observeAgentEnd(messages: unknown[]): void {
-    if (!this.active || !Array.isArray(messages)) return;
+    if (!this.active?.windowStarted || !Array.isArray(messages)) return;
     for (let i = messages.length - 1; i >= 0; i--) {
       if (isAssistantMessage(messages[i])) {
         this.active.candidateFinal = messages[i];
@@ -1599,100 +1847,178 @@ export class ControlEngine {
     }
   }
 
-  onInput(text: string, source: string, fromSelf = false): void {
-    void text;
+  onInput(_text: string, source: string): void {
     if (!this.active) return;
-    // The host's public fromSelf bit is the only origin signal. An extension
-    // submission with identical text is still unrelated when fromSelf=false.
-    if (source === "extension" && fromSelf) return;
-    this.active.interleaved = true;
-  }
-
-  private finishAfterDeferredSettlement(operation: ActiveOperation): void {
-    if (this.active !== operation || !operation.admitted) return;
-    operation.settledPending = false;
-    this.onAgentSettled();
+    // Released Pi does not expose extension origin. Only interactive/RPC
+    // participation is observable; extension participation remains unknown.
+    if (source === "interactive" || source === "rpc") {
+      this.active.interleaved = true;
+    }
   }
 
   /** The single terminal settle point: `agent_settled` after retries/compaction/queued continuations. */
   onAgentSettled(): void {
+    if (this.actionDepth > 0) {
+      if (this.standaloneAbort !== null) {
+        this.standaloneAbort.settledPending = true;
+      } else if (this.active !== null) {
+        this.active.settledPending = true;
+      }
+      return;
+    }
     if (this.standaloneAbort !== null) {
       this.finalizeStandaloneAbort();
       return;
     }
     const op = this.active;
     if (!op) return;
-    if (op.admissionPending) {
-      // Admission resolves after the input pipeline has accepted the message;
-      // do not claim a terminal result or emit started before that point.
+    if (op.actionPending > 0) {
       op.settledPending = true;
       return;
     }
+    if (!op.windowStarted) {
+      this.finalizeUnknownOutcome(op);
+      return;
+    }
     if (op.abortRequests.length > 0) {
+      if (op.preStartAbort) {
+        const outcome = describeFinalAssistant(op.candidateFinal);
+        if (outcome.kind !== "aborted") {
+          this.finalizePreStartAbortRequests(op);
+          op.abortRequests = [];
+          this.onAgentSettled();
+          return;
+        }
+      }
       this.finalizeAbortPair();
       return;
     }
     const outcome = describeFinalAssistant(op.candidateFinal);
-    const interleaved = op.interleaved;
+    const dataBase = {
+      attribution: "activity_window",
+      interleaved: op.interleaved,
+    };
     if (outcome.kind === "error") {
-      this.sendResponse(
-        op.controller,
-        this.buildResponse(
-          op.id,
-          op.command,
-          "failed",
-          op.sequence++,
-          { interleaved },
-          { code: "operation_failed", message: outcome.message },
-        ),
-        true,
-      );
+      this.sendActivityTerminal(op, "failed", dataBase, {
+        code: "operation_failed",
+        message: outcome.message,
+      });
     } else if (outcome.kind === "aborted") {
-      this.sendResponse(
-        op.controller,
-        this.buildResponse(
-          op.id,
-          op.command,
-          "failed",
-          op.sequence++,
-          { interleaved },
-          { code: "operation_aborted", message: "agent run aborted" },
-        ),
-        true,
-      );
+      this.sendActivityTerminal(op, "failed", dataBase, {
+        code: "operation_aborted",
+        message: "agent run aborted",
+      });
     } else if (outcome.kind === "text") {
-      this.sendResponse(
-        op.controller,
-        this.buildResponse(
-          op.id,
-          op.command,
-          "settled",
-          op.sequence++,
-          {
-            text: outcome.text,
-            bytes: outcome.bytes,
-            truncated: outcome.truncated,
-            interleaved,
-          },
-          null,
-        ),
-        true,
+      this.sendActivityTerminal(
+        op,
+        "settled",
+        {
+          ...dataBase,
+          text: outcome.text,
+          bytes: outcome.bytes,
+          truncated: outcome.truncated,
+        },
+        null,
       );
     } else {
+      this.sendActivityTerminal(
+        op,
+        "settled",
+        { ...dataBase, resultUnavailable: true, bytes: 0, truncated: false },
+        null,
+      );
+    }
+    this.clearActive();
+  }
+
+  private finalizePreStartAbortRequests(operation: ActiveOperation): void {
+    const data = {
+      attribution: "activity_window",
+      interleaved: operation.interleaved,
+      aborted: false,
+    };
+    for (const abort of operation.abortRequests) {
       this.sendResponse(
-        op.controller,
+        abort.controller,
         this.buildResponse(
-          op.id,
-          op.command,
+          abort.id,
+          "abort",
           "settled",
-          op.sequence++,
-          { resultUnavailable: true, bytes: 0, truncated: false, interleaved },
+          abort.sequence++,
+          data,
           null,
+        ),
+        true,
+      );
+    }
+  }
+
+  private finalizeUnknownOutcome(operation: ActiveOperation): void {
+    const data = {
+      attribution: "activity_window",
+      interleaved: operation.interleaved,
+      unknownOutcome: true,
+      aborted: false,
+    };
+    const error = {
+      code: "operation_failed" as const,
+      message:
+        "control action outcome is unknown; no correlated agent_start was observed; do not retry automatically",
+    };
+    this.sendActivityTerminal(operation, "failed", data, error);
+    for (const abort of operation.abortRequests) {
+      this.sendResponse(
+        abort.controller,
+        this.buildResponse(
+          abort.id,
+          "abort",
+          "failed",
+          abort.sequence++,
+          data,
+          {
+            code: "operation_failed",
+            message:
+              "abort outcome is unknown because no activity window started; do not retry automatically",
+          },
         ),
         true,
       );
     }
     this.clearActive();
+  }
+
+  private sendActivityTerminal(
+    operation: ActiveOperation,
+    phase: "settled" | "failed",
+    data: Record<string, unknown>,
+    error: ControlResponse["error"],
+  ): void {
+    this.sendResponse(
+      operation.controller,
+      this.buildResponse(
+        operation.id,
+        operation.command,
+        phase,
+        operation.sequence++,
+        data,
+        error,
+      ),
+      true,
+    );
+    for (const joined of operation.joined) {
+      this.sendResponse(
+        joined.controller,
+        this.buildResponse(
+          joined.id,
+          joined.command,
+          phase,
+          joined.sequence++,
+          data,
+          error,
+        ),
+        true,
+      );
+    }
   }
 
   private finalizeStandaloneAbort(): void {
@@ -1718,23 +2044,37 @@ export class ControlEngine {
   private finalizeAbortPair(): void {
     const op = this.active;
     if (!op) return;
-    const interleaved = op.interleaved;
-    // Terminal fail the interrupted request.
-    this.sendResponse(
-      op.controller,
-      this.buildResponse(
-        op.id,
-        op.command,
-        "failed",
-        op.sequence++,
-        { interleaved },
-        {
-          code: "operation_aborted",
-          message: "operation aborted by controller",
-        },
-      ),
-      true,
-    );
+    const data = {
+      attribution: "activity_window",
+      interleaved: op.interleaved,
+    };
+    const requests: ActivityRequest[] = [
+      {
+        id: op.id,
+        command: op.command,
+        controller: op.controller,
+        sequence: op.sequence,
+      },
+      ...op.joined,
+    ];
+    // Terminally fail every request that joined the shared interrupted window.
+    for (const remote of requests) {
+      this.sendResponse(
+        remote.controller,
+        this.buildResponse(
+          remote.id,
+          remote.command,
+          "failed",
+          remote.sequence++,
+          data,
+          {
+            code: "operation_aborted",
+            message: "operation aborted by controller",
+          },
+        ),
+        true,
+      );
+    }
     // Terminally settle every abort request successfully.
     for (const abort of op.abortRequests) {
       this.sendResponse(
@@ -1744,7 +2084,7 @@ export class ControlEngine {
           "abort",
           "settled",
           abort.sequence++,
-          { aborted: true, interleaved },
+          { ...data, aborted: true },
           null,
         ),
         true,
@@ -1754,6 +2094,7 @@ export class ControlEngine {
   }
 
   private clearActive(): void {
+    this.cancelPromptStartDeadline(this.active);
     this.active = null;
   }
 
@@ -1951,16 +2292,17 @@ export class ControlEngine {
 
   /**
    * Best-effort fail any active request(s), then clear active state, the
-   * guarded-injection queue, the outbound response queue, and per-sender
+   * activity-window state, the outbound response queue, and per-sender
    * deduplication records. Failure responses are sent directly (never queued)
    * so nothing outlives the cleanup.
    */
   private cleanupTracking(
     code: "target_reloading" | "target_disconnected",
   ): void {
-    // Bump first so late async submission callbacks from earlier sends can
+    // Bump first so late lifecycle/deadline callbacks from earlier sends can
     // never requeue into the cleared queue.
     this.generation += 1;
+    this.cancelPromptStartDeadline(this.active);
     const op = this.active;
     const standalone = this.standaloneAbort;
     if (standalone) {
@@ -1981,45 +2323,43 @@ export class ControlEngine {
       }
     }
     if (op) {
-      const interleaved = op.interleaved;
-      if (op.abortRequests.length > 0) {
+      const data = {
+        attribution: "activity_window",
+        interleaved: op.interleaved,
+      };
+      const remoteRequests: ActivityRequest[] = [
+        {
+          id: op.id,
+          command: op.command,
+          controller: op.controller,
+          sequence: op.sequence,
+        },
+        ...op.joined,
+      ];
+      for (const remote of remoteRequests) {
         this.sendResponse(
-          op.controller,
+          remote.controller,
           this.buildResponse(
-            op.id,
-            op.command,
+            remote.id,
+            remote.command,
             "failed",
-            op.sequence++,
-            { interleaved },
+            remote.sequence++,
+            data,
             { code, message: boundedCleanupMessage(code) },
           ),
           true,
           false,
         );
-        for (const abort of op.abortRequests) {
-          this.sendResponse(
-            abort.controller,
-            this.buildResponse(
-              abort.id,
-              "abort",
-              "failed",
-              abort.sequence++,
-              {},
-              { code, message: boundedCleanupMessage(code) },
-            ),
-            true,
-            false,
-          );
-        }
-      } else {
+      }
+      for (const abort of op.abortRequests) {
         this.sendResponse(
-          op.controller,
+          abort.controller,
           this.buildResponse(
-            op.id,
-            op.command,
+            abort.id,
+            "abort",
             "failed",
-            op.sequence++,
-            { interleaved },
+            abort.sequence++,
+            data,
             { code, message: boundedCleanupMessage(code) },
           ),
           true,
@@ -2027,7 +2367,7 @@ export class ControlEngine {
         );
       }
     }
-    this.active = null;
+    this.clearActive();
     this.standaloneAbort = null;
     this.responseQueue = [];
     this.dedup.clear();
