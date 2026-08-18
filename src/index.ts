@@ -17,6 +17,7 @@
  */
 
 import type {
+  ContextEvent,
   ExtensionAPI,
   ExtensionContext,
 } from "@earendil-works/pi-coding-agent";
@@ -1153,6 +1154,50 @@ function updateStatus(ctx: ExtensionContext, state: ConnectionState | null) {
   }
 }
 
+type ContextMessage = ContextEvent["messages"][number];
+
+function isInterAgentContextMarker(message: ContextMessage): boolean {
+  return (
+    message.role === "custom" &&
+    (message.customType === "inter-agent-message" ||
+      message.customType === "inter-agent-mailbox")
+  );
+}
+
+function filterInterAgentContext(
+  event: ContextEvent,
+): { messages: ContextEvent["messages"] } | undefined {
+  if (!event.messages.some(isInterAgentContextMarker)) return undefined;
+
+  const toolCallSuppression = new Map<string, boolean>();
+  const messages: ContextEvent["messages"] = [];
+  let changed = false;
+
+  for (const message of event.messages) {
+    if (message.role === "assistant") {
+      const suppressed =
+        message.stopReason === "error" || message.stopReason === "aborted";
+      for (const block of message.content) {
+        if (block.type === "toolCall") {
+          toolCallSuppression.set(block.id, suppressed);
+        }
+      }
+    }
+
+    if (
+      message.role === "toolResult" &&
+      toolCallSuppression.get(message.toolCallId) === true
+    ) {
+      changed = true;
+      continue;
+    }
+
+    messages.push(message);
+  }
+
+  return changed ? { messages } : undefined;
+}
+
 // ── Extension Export ────────────────────────────────────────────────────────
 
 export default function (pi: ExtensionAPI) {
@@ -1273,6 +1318,10 @@ export default function (pi: ExtensionAPI) {
       return box as unknown as Component;
     },
   );
+
+  // Remove provider-invalid tool results from histories containing inter-agent
+  // custom messages. The filter is scoped to each context request.
+  pi.on("context", (event) => filterInterAgentContext(event));
 
   // Register the startup routing-name flag during extension factory so Pi
   // exposes `pi --inter-agent <name>`. The value is only available later, at
