@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "inter-agent-pi"
-version = "0.2.0"
+version = "0.3.0"
 description = "Pi helper for the inter-agent message bus: connect listener and command-line tools"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -18,7 +18,7 @@ classifiers = [
   "Topic :: Communications",
 ]
 dependencies = [
-  "inter-agent-core==0.2.0",
+  "inter-agent-core==0.3.0",
   "websockets==16.0",
 ]
 
@@ -33,6 +33,9 @@ dev = [
   "black==26.3.1",
   "mypy==1.20.2",
 ]
+
+[tool.uv.sources]
+inter-agent-core = { git = "https://github.com/arcanemachine/inter-agent-core", rev = "561b05e9c7f3422dd45ddfc935c39667a4586bb5" }
 
 [tool.setuptools.packages.find]
 where = ["src"]

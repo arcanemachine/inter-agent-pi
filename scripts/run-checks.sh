@@ -40,7 +40,7 @@ rm -rf dist && uv build
 echo "== artifact validation =="
 NPM_TGZ=$(ls arcanemachine-inter-agent-pi-*.tgz)
 WHL=$(ls dist/inter_agent_pi-*.whl)
-SDIST=$(ls dist/inter_agent_pi-0.2.0.tar.gz)
+SDIST=$(ls dist/inter_agent_pi-0.3.0.tar.gz)
 uv run python scripts/validate-artifacts.py "$NPM_TGZ" "$WHL" "$SDIST"
 
 echo "== run-checks OK =="
