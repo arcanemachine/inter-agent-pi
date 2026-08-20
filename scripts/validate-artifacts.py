@@ -16,11 +16,11 @@ import zipfile
 from pathlib import Path
 
 EXPECTED_NPM_NAME = "@arcanemachine/inter-agent-pi"
-EXPECTED_NPM_VERSION = "0.2.1"
+EXPECTED_NPM_VERSION = "0.3.0"
 EXPECTED_PI_IMAGE = "https://raw.githubusercontent.com/arcanemachine/inter-agent-pi/main/logo.png"
 EXPECTED_PY_NAME = "inter-agent-pi"
-EXPECTED_PY_VERSION = "0.2.0"
-EXPECTED_CORE_DEP = "inter-agent-core==0.2.0"
+EXPECTED_PY_VERSION = "0.3.0"
+EXPECTED_CORE_DEP = "inter-agent-core==0.3.0"
 EXPECTED_WS_DEP = "websockets==16.0"
 EXPECTED_PI_PEERS = {
     "@earendil-works/pi-coding-agent",
@@ -143,7 +143,13 @@ def validate_wheel(whl: Path) -> None:
         fail(f"wheel Version not {EXPECTED_PY_VERSION!r}")
     if EXPECTED_CORE_DEP not in meta:
         fail(f"wheel missing Requires-Dist {EXPECTED_CORE_DEP!r}")
-    # No path source or old inter-agent dependency leaked into built metadata.
+    # No path, Git, direct URL, or old inter-agent dependency may leak into
+    # built dependency metadata even though uv uses a development source.
+    for line in meta.splitlines():
+        if line.startswith("Requires-Dist: inter-agent-core") and any(
+            marker in line for marker in ("git", "file:", "://", " @ ")
+        ):
+            fail(f"wheel metadata contains a non-registry Core dependency: {line!r}")
     for bad in (
         "file://",
         "../../tmp",
@@ -183,6 +189,13 @@ def validate_sdist(sdist: Path) -> None:
         fail(f"sdist Name not {EXPECTED_PY_NAME!r}")
     if f"Version: {EXPECTED_PY_VERSION}" not in body:
         fail(f"sdist Version not {EXPECTED_PY_VERSION!r}")
+    if EXPECTED_CORE_DEP not in body:
+        fail(f"sdist missing Requires-Dist {EXPECTED_CORE_DEP!r}")
+    for line in body.splitlines():
+        if line.startswith("Requires-Dist: inter-agent-core") and any(
+            marker in line for marker in ("git", "file:", "://", " @ ")
+        ):
+            fail(f"sdist metadata contains a non-registry Core dependency: {line!r}")
     if not any(n.endswith("inter_agent_pi/__init__.py") for n in names):
         fail("sdist has no inter_agent_pi source")
     for n in names:

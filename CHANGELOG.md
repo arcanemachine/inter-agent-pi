@@ -5,6 +5,22 @@ This repository begins with a clean one-commit history; the baseline below is
 the split-generation source extracted from the coordinated monorepo
 `0.2.0` split generation.
 
+## 0.3.0 — Pi control implementation
+
+- Added opt-in `pi.control.v1` target control for `prompt`, `steer`,
+  `follow_up`, `abort`, `state`, and graceful `shutdown` through the
+  controller's existing authenticated Pi identity.
+- Added the `inter_agent_control` model tool, grouped `/inter-agent control`
+  command, strict allowlist and payload validation, bounded responses,
+  activity-window settlement, observed interleaving reporting, deduplication,
+  reconnect handling, and unknown-outcome/no-automatic-retry semantics.
+- Documented the one-user/one-machine trust boundary, public Pi API
+  compatibility, privacy limits, ordinary messaging compatibility, and the
+  Session Manager separation.
+- Updated the helper and npm extension metadata to compatible `0.3.0` values;
+  the development lock resolves the accepted immutable Core commit while
+  built Python artifacts retain the registry dependency metadata.
+
 ## 0.2.1 — npm gallery metadata
 
 - Added the Pi gallery logo and `pi.image` metadata.
