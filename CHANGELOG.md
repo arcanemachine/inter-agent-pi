@@ -20,6 +20,7 @@ the split-generation source extracted from the coordinated monorepo
 - Updated the helper and npm extension metadata to compatible `0.3.0` values;
   the development lock resolves the accepted immutable Core commit while
   built Python artifacts retain the registry dependency metadata.
+- Added the centered README logo used by the Pi package gallery.
 
 ## 0.2.1 — npm gallery metadata
 
