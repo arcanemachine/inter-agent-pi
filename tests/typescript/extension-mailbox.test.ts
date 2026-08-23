@@ -16,6 +16,7 @@ import ext, {
   _setReloadCarrierForTest,
   _setStopTimeoutsForTest,
 } from "../../src/index.js";
+import type { ContextEvent } from "@earendil-works/pi-coding-agent";
 import type { ReloadHandoff, ReloadHandoffCarrier } from "../../src/mailbox.js";
 
 // ── Fake Pi runtime ─────────────────────────────────────────────────────────
@@ -181,6 +182,78 @@ class FakePi {
   appendEntry(customType: string, data: unknown): void {
     this.branch.push({ type: "custom", customType, data });
   }
+}
+
+type ContextMessage = ContextEvent["messages"][number];
+type CustomContextMessage = Extract<ContextMessage, { role: "custom" }>;
+type ContextResult = { messages?: ContextEvent["messages"] };
+
+type TestStopReason = "error" | "aborted" | "toolUse";
+
+function contextMarker(customType: string): CustomContextMessage {
+  return {
+    role: "custom",
+    customType,
+    content: "internal agent body",
+    display: false,
+    details: { displayContent: "user-facing summary", marker: customType },
+    timestamp: 1,
+  } as CustomContextMessage;
+}
+
+function contextAssistant(
+  stopReason: TestStopReason,
+  toolCallIds: string[],
+): ContextMessage {
+  return {
+    role: "assistant",
+    content: toolCallIds.map((id) => ({
+      type: "toolCall",
+      id,
+      name: "bash",
+      arguments: { command: "pwd" },
+    })),
+    api: "openai-completions",
+    provider: "openai",
+    model: "test-model",
+    usage: {
+      input: 0,
+      output: 0,
+      cacheRead: 0,
+      cacheWrite: 0,
+      totalTokens: 0,
+      cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+    },
+    stopReason,
+    timestamp: 2,
+  } as ContextMessage;
+}
+
+function contextToolResult(
+  toolCallId: string,
+  text = "tool output",
+): ContextMessage {
+  return {
+    role: "toolResult",
+    toolCallId,
+    toolName: "bash",
+    content: [{ type: "text", text }],
+    isError: false,
+    timestamp: 3,
+  } as ContextMessage;
+}
+
+async function runContextHandler(
+  pi: FakePi,
+  messages: ContextEvent["messages"],
+): Promise<ContextResult | undefined> {
+  const handlers = pi.handlers.get("context");
+  assert.ok(handlers, "context handler not registered");
+  let result: unknown;
+  for (const handler of handlers) {
+    result = await handler({ type: "context", messages }, pi.ctx);
+  }
+  return result as ContextResult | undefined;
 }
 
 // ── Environment + spawn fakes ───────────────────────────────────────────────
@@ -360,6 +433,153 @@ function emitDirectMsg(
 }
 
 // ── Tests ───────────────────────────────────────────────────────────────────
+
+test("context filter removes results paired with error and aborted assistants", async () => {
+  await withEnv({}, async ({ pi }) => {
+    for (const stopReason of ["error", "aborted"] as const) {
+      const marker = contextMarker("inter-agent-message");
+      const result = await runContextHandler(pi, [
+        marker,
+        contextAssistant(stopReason, ["call-suppressed"]),
+        contextToolResult("call-suppressed"),
+      ]);
+      assert.deepEqual(result?.messages, [
+        marker,
+        contextAssistant(stopReason, ["call-suppressed"]),
+      ]);
+    }
+  });
+});
+
+test("context filter preserves a valid assistant and tool result pairing", async () => {
+  await withEnv({}, async ({ pi }) => {
+    const marker = contextMarker("inter-agent-message");
+    const suppressed = await runContextHandler(pi, [
+      marker,
+      contextAssistant("error", ["call-valid"]),
+      contextToolResult("call-valid"),
+    ]);
+    assert.ok(suppressed);
+
+    const assistant = contextAssistant("toolUse", ["call-valid"]);
+    const toolResult = contextToolResult("call-valid");
+    const result = await runContextHandler(pi, [marker, assistant, toolResult]);
+
+    assert.equal(result, undefined);
+  });
+});
+
+test("context filter preserves a valid pairing after a reused tool-call ID", async () => {
+  await withEnv({}, async ({ pi }) => {
+    const marker = contextMarker("inter-agent-message");
+    const validAssistant = contextAssistant("toolUse", ["call-reused"]);
+    const freshResult = contextToolResult("call-reused", "fresh output");
+    const result = await runContextHandler(pi, [
+      marker,
+      contextAssistant("error", ["call-reused"]),
+      contextToolResult("call-reused", "stale output"),
+      validAssistant,
+      freshResult,
+    ]);
+
+    assert.equal(result?.messages?.length, 4);
+    assert.equal(result?.messages?.[0], marker);
+    assert.equal(result?.messages?.[1].role, "assistant");
+    assert.equal(result?.messages?.[2], validAssistant);
+    assert.equal(result?.messages?.[3], freshResult);
+  });
+});
+
+test("context filter removes results for every suppressed tool-call ID", async () => {
+  await withEnv({}, async ({ pi }) => {
+    const marker = contextMarker("inter-agent-message");
+    const result = await runContextHandler(pi, [
+      marker,
+      contextAssistant("aborted", ["call-one", "call-two"]),
+      contextToolResult("call-one"),
+      contextToolResult("call-two"),
+    ]);
+
+    assert.equal(result?.messages?.length, 2);
+    assert.equal(result?.messages?.[0], marker);
+    assert.equal(result?.messages?.[1].role, "assistant");
+  });
+});
+
+test("context filter preserves unmatched tool results", async () => {
+  await withEnv({}, async ({ pi }) => {
+    const messages = [
+      contextMarker("inter-agent-message"),
+      contextToolResult("call-unmatched"),
+    ];
+    const result = await runContextHandler(pi, messages);
+
+    assert.equal(result, undefined);
+  });
+});
+
+test("context filter stays inactive without an exact inter-agent marker", async () => {
+  await withEnv({}, async ({ pi }) => {
+    const contexts = [
+      [
+        contextAssistant("error", ["call-no-marker"]),
+        contextToolResult("call-no-marker"),
+      ],
+      [
+        contextMarker("other-custom-type"),
+        contextAssistant("error", ["call-unrelated-marker"]),
+        contextToolResult("call-unrelated-marker"),
+      ],
+    ];
+
+    for (const messages of contexts) {
+      const result = await runContextHandler(pi, messages);
+      assert.equal(result, undefined);
+    }
+  });
+});
+
+test("context filter activates for both inter-agent custom message types", async () => {
+  await withEnv({}, async ({ pi }) => {
+    for (const customType of ["inter-agent-message", "inter-agent-mailbox"]) {
+      const marker = contextMarker(customType);
+      const result = await runContextHandler(pi, [
+        marker,
+        contextAssistant("error", ["call-marker"]),
+        contextToolResult("call-marker"),
+      ]);
+      assert.equal(result?.messages?.length, 2);
+      assert.equal(result?.messages?.[0], marker);
+      assert.equal(result?.messages?.[1].role, "assistant");
+    }
+  });
+});
+
+test("context filter does not mutate messages or affect UI fields", async () => {
+  await withEnv({}, async ({ pi }) => {
+    const marker = contextMarker("inter-agent-mailbox");
+    const messages = [
+      marker,
+      contextAssistant("error", ["call-unchanged"]),
+      contextToolResult("call-unchanged"),
+    ];
+    const before = structuredClone(messages);
+    const result = await runContextHandler(pi, messages);
+
+    assert.deepEqual(messages, before);
+    assert.equal(pi.notifyLog.length, 0);
+    assert.equal(pi.messages.length, 0);
+    const kept = result?.messages?.[0];
+    assert.ok(kept);
+    assert.equal(kept.role, "custom");
+    if (kept.role === "custom") {
+      assert.equal(kept.customType, marker.customType);
+      assert.equal(kept.content, marker.content);
+      assert.equal(kept.display, marker.display);
+      assert.deepEqual(kept.details, marker.details);
+    }
+  });
+});
 
 test("invalid config keys warn exactly once after UI context is available", async () => {
   await withEnv(

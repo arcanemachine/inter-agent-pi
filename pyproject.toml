@@ -35,7 +35,7 @@ dev = [
 ]
 
 [tool.uv.sources]
-inter-agent-core = { git = "https://github.com/arcanemachine/inter-agent-core", rev = "561b05e9c7f3422dd45ddfc935c39667a4586bb5" }
+inter-agent-core = { git = "https://github.com/arcanemachine/inter-agent-core", rev = "61b19a9f1fe0e8b5d19fd9cd7e2efc3a183541c1" }
 
 [tool.setuptools.packages.find]
 where = ["src"]

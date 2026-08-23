@@ -5,6 +5,10 @@ This repository begins with a clean one-commit history; the baseline below is
 the split-generation source extracted from the coordinated monorepo
 `0.2.0` split generation.
 
+## 0.3.1 — npm publish checks
+
+- Added npm prepublish checks for formatting, typechecking, tests, and build.
+
 ## 0.3.0 — Pi control implementation
 
 - Added opt-in `pi.control.v1` target control for `prompt`, `steer`,
@@ -20,6 +24,7 @@ the split-generation source extracted from the coordinated monorepo
 - Updated the helper and npm extension metadata to compatible `0.3.0` values;
   the development lock resolves the accepted immutable Core commit while
   built Python artifacts retain the registry dependency metadata.
+- Added the centered README logo used by the Pi package gallery.
 
 ## 0.2.1 — npm gallery metadata
 

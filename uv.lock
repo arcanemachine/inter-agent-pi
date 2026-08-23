@@ -279,7 +279,7 @@ wheels = [
 [[package]]
 name = "inter-agent-core"
 version = "0.3.0"
-source = { git = "https://github.com/arcanemachine/inter-agent-core?rev=561b05e9c7f3422dd45ddfc935c39667a4586bb5#561b05e9c7f3422dd45ddfc935c39667a4586bb5" }
+source = { git = "https://github.com/arcanemachine/inter-agent-core?rev=61b19a9f1fe0e8b5d19fd9cd7e2efc3a183541c1#61b19a9f1fe0e8b5d19fd9cd7e2efc3a183541c1" }
 dependencies = [
     { name = "cryptography" },
     { name = "websockets" },
@@ -305,7 +305,7 @@ dev = [
 
 [package.metadata]
 requires-dist = [
-    { name = "inter-agent-core", git = "https://github.com/arcanemachine/inter-agent-core?rev=561b05e9c7f3422dd45ddfc935c39667a4586bb5" },
+    { name = "inter-agent-core", git = "https://github.com/arcanemachine/inter-agent-core?rev=61b19a9f1fe0e8b5d19fd9cd7e2efc3a183541c1" },
     { name = "websockets", specifier = "==16.0" },
 ]
 

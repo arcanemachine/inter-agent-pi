@@ -1,6 +1,6 @@
 {
   "name": "@arcanemachine/inter-agent-pi",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "description": "Pi extension for connecting to the inter-agent message bus",
   "type": "module",
   "scripts": {
@@ -8,7 +8,9 @@
     "watch": "tsc --watch",
     "typecheck": "tsc --noEmit",
     "test": "tsc -p tsconfig.test.json && node --test --test-concurrency=1 dist-tests/tests/typescript/*.test.js",
-    "format": "prettier --write src/index.ts src/control.ts src/mailbox.ts tests/**/*.ts README.md package.json tsconfig.json tsconfig.test.json"
+    "format": "prettier --write src/index.ts src/control.ts src/mailbox.ts \"tests/**/*.ts\" README.md package.json tsconfig.json tsconfig.test.json",
+    "format:check": "prettier --check src/index.ts src/control.ts src/mailbox.ts \"tests/**/*.ts\" README.md package.json tsconfig.json tsconfig.test.json",
+    "prepublishOnly": "npm run format:check && npm run typecheck && npm test && npm run build"
   },
   "keywords": [
     "pi",
