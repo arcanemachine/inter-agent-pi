@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "inter-agent-pi"
-version = "0.3.0"
+version = "0.3.1"
 description = "Pi helper for the inter-agent message bus: connect listener and command-line tools"
 readme = "README.md"
 requires-python = ">=3.10"

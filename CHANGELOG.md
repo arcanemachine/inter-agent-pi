@@ -5,6 +5,12 @@ This repository begins with a clean one-commit history; the baseline below is
 the split-generation source extracted from the coordinated monorepo
 `0.2.0` split generation.
 
+## 0.3.2 — Pi control release candidate
+
+- Prepared the public-API Pi control implementation for npm `0.3.2` and
+  Python helper `0.3.1` after the previously published versions were found to
+  lack the control bridge.
+
 ## 0.3.1 — npm publish checks
 
 - Added npm prepublish checks for formatting, typechecking, tests, and build.
