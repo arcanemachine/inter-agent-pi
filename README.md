@@ -184,6 +184,10 @@ prompt marker, transcript persistence, or model-mediated acknowledgement.
 Session Manager is neither required nor coupled; it has no role in routing,
 readiness, allowlists, protocol, or control state.
 
+For optional visible worker hosting in a dedicated tmux server, see the
+[Session Manager composition guide](SESSION_MANAGER.md). Plain terminals and
+ordinary tmux remain the baseline.
+
 ## Connection and mailbox behavior
 
 The default mailbox is queued and capped at 128 unread messages. A same-process `/reload` preserves unread messages; an explicit disconnect or process restart begins with an empty mailbox. Transient listener failures use bounded reconnect attempts and restore desired channel subscriptions. Authentication, invalid-name, name-conflict, and kick failures require user action.
