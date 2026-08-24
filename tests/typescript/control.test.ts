@@ -876,6 +876,10 @@ test("authorization uses envelope from_name and never payload identity", () => {
   const rejection = host.responsesFor("r1").slice(-1)[0];
   assert.equal(rejection?.phase, "rejected");
   assert.equal(rejection?.error?.code, "unauthorized");
+  assert.equal(
+    rejection?.error?.message,
+    "Session intruder is not authorized to control session worker-a",
+  );
 
   // A payload-level identity field is an unknown extra field and is rejected
   // as malformed; it is never trusted for authorization and never executes.

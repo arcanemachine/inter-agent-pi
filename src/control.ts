@@ -1229,7 +1229,7 @@ export class ControlEngine {
     // identity fields never exist (strict parsing) and are never consulted.
     if (!this.authorized(fromName)) {
       const message = this.enabled
-        ? "sender routing name is not allowlisted for control"
+        ? `Session ${fromName} is not authorized to control session ${this.host.selfName() ?? "unknown"}`
         : "control is disabled on this target";
       this.emitRejection(fromName, id, command, "unauthorized", message);
       return;
