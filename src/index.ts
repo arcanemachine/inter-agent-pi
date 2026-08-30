@@ -456,6 +456,22 @@ function notify(
   currentCtx?.ui.notify(truncate(`${title}: ${body}`, NOTIFY_MAX_LEN), type);
 }
 
+function sendConnectionStatus(
+  pi: ExtensionAPI,
+  status: "connected" | "disconnected",
+  body: string,
+): void {
+  pi.sendMessage(
+    {
+      customType: "inter-agent-status",
+      content: `[inter-agent] ${status}: ${body}`,
+      display: false,
+      details: { status, body },
+    },
+    { deliverAs: "nextTurn", triggerTurn: false },
+  );
+}
+
 // Build an inbound peer body as a custom `inter-agent-message` payload. The
 // content carries the body plus bounded reply-decision guidance; the display
 // content is the clean body shown in the TUI. Immediate delivery reuses this
@@ -918,10 +934,9 @@ async function startListener(
           // private bridge is ready, so queued control responses flush here.
           controlEngine?.onListenerReady();
           if (options.notifyOnReady) {
-            notify(
-              "[inter-agent] connected",
-              `as ${name}${label ? ` (${label})` : ""}`,
-            );
+            const body = `as ${name}${label ? ` (${label})` : ""}`;
+            notify("[inter-agent] connected", body);
+            sendConnectionStatus(pi, "connected", body);
           }
           continue;
         }
@@ -1043,17 +1058,15 @@ async function startListener(
       const reconnectHint = wasConnected
         ? `. Use /inter-agent connect ${previousName} to reconnect.`
         : "";
-      notify(
-        "[inter-agent] listener exited",
-        `code ${code}${reconnectHint}`,
-        "warning",
-      );
+      const body = `code ${code}${reconnectHint}`;
+      notify("[inter-agent] listener exited", body, "warning");
+      if (wasConnected) {
+        sendConnectionStatus(pi, "disconnected", `listener exited: ${body}`);
+      }
     } else if (wasConnected) {
-      notify(
-        "[inter-agent] disconnected",
-        `server connection closed. Use '/inter-agent connect ${previousName}' to reconnect.`,
-        "warning",
-      );
+      const body = `server connection closed. Use '/inter-agent connect ${previousName}' to reconnect.`;
+      notify("[inter-agent] disconnected", body, "warning");
+      sendConnectionStatus(pi, "disconnected", body);
     }
   });
 
@@ -1850,9 +1863,12 @@ export default function (pi: ExtensionAPI) {
     // is removed so best-effort responses can still reach controllers.
     controlController?.onSessionShutdown("target_disconnected");
     controlEngine?.onExplicitDisconnect();
+    const wasConnected = listenerReady && currentConnection !== null;
     const stopped = await stopListener(pi, ctx, { expected: true });
     if (stopped) {
-      notify("[inter-agent] disconnected", "listener stopped");
+      const body = "listener stopped";
+      notify("[inter-agent] disconnected", body);
+      if (wasConnected) sendConnectionStatus(pi, "disconnected", body);
     } else {
       notify(
         "[inter-agent] disconnect failed",

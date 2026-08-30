@@ -24,7 +24,12 @@ import type { ReloadHandoff, ReloadHandoffCarrier } from "../../src/mailbox.js";
 type Handler = (...args: unknown[]) => unknown;
 
 interface RecordedMessage {
-  message: { customType: string; content: string; details: unknown };
+  message: {
+    customType: string;
+    content: string;
+    display?: boolean;
+    details: unknown;
+  };
   options: { triggerTurn?: boolean; deliverAs?: string };
 }
 
@@ -173,7 +178,12 @@ class FakePi {
   }
 
   sendMessage(
-    message: { customType: string; content: string; details: unknown },
+    message: {
+      customType: string;
+      content: string;
+      display?: boolean;
+      details: unknown;
+    },
     options: { triggerTurn?: boolean; deliverAs?: string },
   ): void {
     this.messages.push({ message, options });
@@ -798,6 +808,89 @@ test("queued user notification is metadata-only while immediate shows the bounde
   );
 });
 
+test("connection transitions notify the model without triggering a turn", async () => {
+  await withEnv(
+    { project: { projectPath: process.cwd(), deliveryMode: "queued" } },
+    async ({ pi, listeners }) => {
+      const cmd = interAgentCommand(pi);
+      await cmd.handler("connect rx", pi.ctx);
+      const listener = listeners[listeners.length - 1];
+      listener.emitStdout(JSON.stringify({ op: "welcome" }) + "\n");
+      await tick();
+
+      const connected = connectionStatuses(pi);
+      assert.equal(connected.length, 1);
+      assert.equal(
+        connected[0].message.content,
+        "[inter-agent] connected: as rx",
+      );
+      assert.equal(connected[0].message.display, false);
+      assert.deepEqual(connected[0].message.details, {
+        status: "connected",
+        body: "as rx",
+      });
+      assert.deepEqual(connected[0].options, {
+        triggerTurn: false,
+        deliverAs: "nextTurn",
+      });
+      assert.ok(
+        pi.notifyLog.some((entry) =>
+          entry.message.includes("[inter-agent] connected: as rx"),
+        ),
+      );
+
+      await cmd.handler("disconnect", pi.ctx);
+      const statuses = connectionStatuses(pi);
+      assert.equal(statuses.length, 2);
+      assert.equal(
+        statuses[1].message.content,
+        "[inter-agent] disconnected: listener stopped",
+      );
+      assert.equal(statuses[1].message.display, false);
+      assert.deepEqual(statuses[1].message.details, {
+        status: "disconnected",
+        body: "listener stopped",
+      });
+      assert.deepEqual(statuses[1].options, {
+        triggerTurn: false,
+        deliverAs: "nextTurn",
+      });
+
+      // Repeating disconnect while already disconnected keeps the model quiet.
+      await cmd.handler("disconnect", pi.ctx);
+      assert.equal(connectionStatuses(pi).length, 2);
+    },
+  );
+});
+
+test("unexpected listener exit notifies the model of disconnection", async () => {
+  await withEnv(
+    { project: { projectPath: process.cwd(), deliveryMode: "queued" } },
+    async ({ pi, listeners }) => {
+      const cmd = interAgentCommand(pi);
+      await cmd.handler("connect rx", pi.ctx);
+      const listener = listeners[listeners.length - 1];
+      listener.emitStdout(JSON.stringify({ op: "welcome" }) + "\n");
+      await tick();
+      listener.exit(0);
+      await tick();
+
+      const statuses = connectionStatuses(pi);
+      assert.equal(statuses.length, 2);
+      assert.equal(statuses[1].message.customType, "inter-agent-status");
+      assert.match(
+        statuses[1].message.content,
+        /^\[inter-agent\] disconnected: server connection closed\./,
+      );
+      assert.equal(statuses[1].message.display, false);
+      assert.deepEqual(statuses[1].options, {
+        triggerTurn: false,
+        deliverAs: "nextTurn",
+      });
+    },
+  );
+});
+
 test("listener disconnect and reconnect preserve unread mailbox state", async () => {
   await withEnv(
     { project: { projectPath: process.cwd(), deliveryMode: "queued" } },
@@ -976,6 +1069,12 @@ function emitMsg(
 function mailboxNotices(pi: FakePi): RecordedMessage[] {
   return pi.messages.filter(
     (m) => m.message.customType === "inter-agent-mailbox",
+  );
+}
+
+function connectionStatuses(pi: FakePi): RecordedMessage[] {
+  return pi.messages.filter(
+    (m) => m.message.customType === "inter-agent-status",
   );
 }
 

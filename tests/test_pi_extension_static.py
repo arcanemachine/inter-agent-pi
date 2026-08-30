@@ -125,7 +125,8 @@ def test_pi_extension_disconnect_reports_success_or_failure_after_stop() -> None
     disconnect_body = disconnect_body.split("async function handleRename", 1)[0]
 
     assert "await stopListener(pi, ctx, { expected: true })" in disconnect_body
-    assert 'notify("[inter-agent] disconnected", "listener stopped")' in disconnect_body
+    assert 'const body = "listener stopped";' in disconnect_body
+    assert 'notify("[inter-agent] disconnected", body);' in disconnect_body
     assert (
         "notify(\n"
         '        "[inter-agent] disconnect failed",\n'
@@ -206,9 +207,19 @@ def test_pi_extension_notifies_when_server_connection_closes() -> None:
 
     listener_body = content.split("async function startListener", 1)[1]
     listener_body = listener_body.split("async function stopListener", 1)[0]
-    assert 'notify(\n        "[inter-agent] disconnected"' in listener_body
+    assert 'notify("[inter-agent] disconnected", body, "warning")' in listener_body
     assert "server connection closed" in listener_body
     assert "Use /inter-agent connect" in listener_body
+
+
+def test_pi_extension_sends_connection_status_to_model_without_turn() -> None:
+    content = PI_EXTENSION.read_text(encoding="utf-8")
+
+    assert 'customType: "inter-agent-status"' in content
+    assert "display: false" in content
+    assert '{ deliverAs: "nextTurn", triggerTurn: false }' in content
+    assert 'sendConnectionStatus(pi, "connected", body)' in content
+    assert 'sendConnectionStatus(pi, "disconnected", body)' in content
 
 
 def test_pi_extension_send_command_gates_on_connection() -> None:
@@ -759,7 +770,7 @@ def test_pi_extension_registers_metadata_only_mailbox_notice() -> None:
     notice_body = content.split("sendNotice: (message, triggerTurn)", 1)[1]
     notice_body = notice_body.split("notifyWarning", 1)[0]
     assert 'deliverAs: "followUp"' in notice_body
-    assert 'deliverAs: "nextTurn"' not in content
+    assert 'deliverAs: "nextTurn"' not in notice_body
     assert 'deliverAs: "steer"' not in content
     assert "ctx.abort()" not in content
 
