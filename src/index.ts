@@ -459,18 +459,24 @@ function notify(
 function sendConnectionStatus(
   pi: ExtensionAPI,
   status: "connected" | "disconnected",
-  body: string,
+  message: string,
 ): void {
   pi.sendMessage(
     {
       customType: "inter-agent-status",
-      content: `[inter-agent] ${status}: ${body}`,
-      display: false,
-      details: { status, body },
+      content: message,
+      display: true,
+      details: { status },
     },
-    { deliverAs: "nextTurn", triggerTurn: false },
+    { deliverAs: "followUp", triggerTurn: false },
   );
 }
+
+function connectedMessage(name: string, label: string | null): string {
+  return `Connected to inter-agent message bus as "${name}"${label ? ` (${label})` : ""}.`;
+}
+
+const DISCONNECTED_MESSAGE = "Disconnected from inter-agent message bus.";
 
 // Build an inbound peer body as a custom `inter-agent-message` payload. The
 // content carries the body plus bounded reply-decision guidance; the display
@@ -877,6 +883,7 @@ async function startListener(
   label: string | null,
   options: ListenerOptions = {},
 ): Promise<boolean> {
+  const wasConnected = listenerReady && currentConnection !== null;
   const stopped = await stopListener(pi, ctx, { expected: true });
   if (!stopped) {
     notify(
@@ -885,6 +892,9 @@ async function startListener(
       "error",
     );
     return false;
+  }
+  if (wasConnected) {
+    sendConnectionStatus(pi, "disconnected", DISCONNECTED_MESSAGE);
   }
 
   const scripts = getScripts(config);
@@ -934,9 +944,11 @@ async function startListener(
           // private bridge is ready, so queued control responses flush here.
           controlEngine?.onListenerReady();
           if (options.notifyOnReady) {
-            const body = `as ${name}${label ? ` (${label})` : ""}`;
-            notify("[inter-agent] connected", body);
-            sendConnectionStatus(pi, "connected", body);
+            sendConnectionStatus(
+              pi,
+              "connected",
+              connectedMessage(name, label),
+            );
           }
           continue;
         }
@@ -1059,14 +1071,17 @@ async function startListener(
         ? `. Use /inter-agent connect ${previousName} to reconnect.`
         : "";
       const body = `code ${code}${reconnectHint}`;
-      notify("[inter-agent] listener exited", body, "warning");
       if (wasConnected) {
-        sendConnectionStatus(pi, "disconnected", `listener exited: ${body}`);
+        sendConnectionStatus(
+          pi,
+          "disconnected",
+          `${DISCONNECTED_MESSAGE} Listener exited: ${body}`,
+        );
+      } else {
+        notify("[inter-agent] listener exited", body, "warning");
       }
     } else if (wasConnected) {
-      const body = `server connection closed. Use '/inter-agent connect ${previousName}' to reconnect.`;
-      notify("[inter-agent] disconnected", body, "warning");
-      sendConnectionStatus(pi, "disconnected", body);
+      sendConnectionStatus(pi, "disconnected", DISCONNECTED_MESSAGE);
     }
   });
 
@@ -1467,6 +1482,22 @@ export default function (pi: ExtensionAPI) {
   mailboxController = mailbox;
 
   // ── Custom message renderer ──────────────────────────────────────────────
+  // Connection status messages are visible in both the transcript and model
+  // context, but never trigger a turn.
+  pi.registerMessageRenderer<{
+    status?: "connected" | "disconnected";
+  }>("inter-agent-status", (message, _options, theme) => {
+    const details =
+      typeof message.details === "object" && message.details !== null
+        ? (message.details as { status?: "connected" | "disconnected" })
+        : undefined;
+    const color = details?.status === "disconnected" ? "warning" : "success";
+    const content = typeof message.content === "string" ? message.content : "";
+    const box = new Box(1, 1, (t) => theme.bg("customMessageBg", t));
+    box.addChild(new Text(theme.fg(color, content), 0, 0));
+    return box as unknown as Component;
+  });
+
   // Show a clean, user-facing summary in the TUI (from details.displayContent)
   // while the full `content` (with internal agent instructions) goes to the LLM.
   pi.registerMessageRenderer<{
@@ -1656,7 +1687,10 @@ export default function (pi: ExtensionAPI) {
         notifyOnReady: true,
       });
       if (started) {
-        notify("[inter-agent] connecting", `as ${explicitName}`);
+        notify(
+          "[inter-agent] connecting",
+          `to inter-agent message bus as "${explicitName}"`,
+        );
       }
       return;
     }
@@ -1680,7 +1714,10 @@ export default function (pi: ExtensionAPI) {
         },
       );
       if (started) {
-        notify("[inter-agent] reconnecting", `as ${state.name}`);
+        notify(
+          "[inter-agent] reconnecting",
+          `to inter-agent message bus as "${state.name}"`,
+        );
       }
     }
   });
@@ -1854,7 +1891,7 @@ export default function (pi: ExtensionAPI) {
 
     notify(
       "[inter-agent] connecting",
-      `as ${parsed.name}${parsed.label ? ` (${parsed.label})` : ""}`,
+      `to inter-agent message bus as "${parsed.name}"${parsed.label ? ` (${parsed.label})` : ""}`,
     );
   }
 
@@ -1866,9 +1903,9 @@ export default function (pi: ExtensionAPI) {
     const wasConnected = listenerReady && currentConnection !== null;
     const stopped = await stopListener(pi, ctx, { expected: true });
     if (stopped) {
-      const body = "listener stopped";
-      notify("[inter-agent] disconnected", body);
-      if (wasConnected) sendConnectionStatus(pi, "disconnected", body);
+      if (wasConnected) {
+        sendConnectionStatus(pi, "disconnected", DISCONNECTED_MESSAGE);
+      }
     } else {
       notify(
         "[inter-agent] disconnect failed",
@@ -1953,7 +1990,7 @@ export default function (pi: ExtensionAPI) {
 
     notify(
       "[inter-agent] renaming",
-      `${oldName} -> ${parsed.name}${label ? ` (${label})` : ""}`,
+      `inter-agent message bus connection from "${oldName}" to "${parsed.name}"${label ? ` (${label})` : ""}`,
     );
   }
 

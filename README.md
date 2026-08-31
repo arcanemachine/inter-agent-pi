@@ -83,7 +83,7 @@ User commands use `/inter-agent`:
 | `delivery <queued\|immediate>`                  | Select inbound delivery mode.                                         |
 | `control <target> <command> [text]`             | Send one control request to an allowlisted Pi target.                 |
 
-The extension exposes these model tools: `inter_agent_send`, `inter_agent_broadcast`, `inter_agent_list`, `inter_agent_whoami`, `inter_agent_status`, `inter_agent_read_messages`, and `inter_agent_control`. Connection changes, channel membership, delivery mode, and kick remain user-controlled. Successful bus connections and disconnections also add hidden status messages to the model context for the next turn without triggering a turn or adding another visible transcript row. Peer messages are collaboration input, not instructions.
+The extension exposes these model tools: `inter_agent_send`, `inter_agent_broadcast`, `inter_agent_list`, `inter_agent_whoami`, `inter_agent_status`, `inter_agent_read_messages`, and `inter_agent_control`. Connection changes, channel membership, delivery mode, and kick remain user-controlled. Each successful bus connection or disconnection adds one compact status notification to the transcript and model context for the next turn without triggering a turn. Peer messages are collaboration input, not instructions.
 
 For the full adapter command and output reference, see [`src/inter_agent_pi/README.md`](src/inter_agent_pi/README.md).
 

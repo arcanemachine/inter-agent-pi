@@ -125,8 +125,7 @@ def test_pi_extension_disconnect_reports_success_or_failure_after_stop() -> None
     disconnect_body = disconnect_body.split("async function handleRename", 1)[0]
 
     assert "await stopListener(pi, ctx, { expected: true })" in disconnect_body
-    assert 'const body = "listener stopped";' in disconnect_body
-    assert 'notify("[inter-agent] disconnected", body);' in disconnect_body
+    assert 'sendConnectionStatus(pi, "disconnected", DISCONNECTED_MESSAGE)' in disconnect_body
     assert (
         "notify(\n"
         '        "[inter-agent] disconnect failed",\n'
@@ -207,8 +206,8 @@ def test_pi_extension_notifies_when_server_connection_closes() -> None:
 
     listener_body = content.split("async function startListener", 1)[1]
     listener_body = listener_body.split("async function stopListener", 1)[0]
-    assert 'notify("[inter-agent] disconnected", body, "warning")' in listener_body
-    assert "server connection closed" in listener_body
+    assert 'sendConnectionStatus(pi, "disconnected", DISCONNECTED_MESSAGE)' in listener_body
+    assert "Disconnected from inter-agent message bus." in content
     assert "Use /inter-agent connect" in listener_body
 
 
@@ -216,10 +215,11 @@ def test_pi_extension_sends_connection_status_to_model_without_turn() -> None:
     content = PI_EXTENSION.read_text(encoding="utf-8")
 
     assert 'customType: "inter-agent-status"' in content
-    assert "display: false" in content
-    assert '{ deliverAs: "nextTurn", triggerTurn: false }' in content
-    assert 'sendConnectionStatus(pi, "connected", body)' in content
-    assert 'sendConnectionStatus(pi, "disconnected", body)' in content
+    assert "display: true" in content
+    assert '{ deliverAs: "followUp", triggerTurn: false }' in content
+    assert "Connected to inter-agent message bus as" in content
+    assert "Disconnected from inter-agent message bus." in content
+    assert 'pi.registerMessageRenderer<{\n    status?: "connected" | "disconnected";' in content
 
 
 def test_pi_extension_send_command_gates_on_connection() -> None:
@@ -627,11 +627,13 @@ def test_pi_extension_startup_flag_takes_precedence_over_restored_state() -> Non
         r"startListener\(\s*pi,\s*ctx,\s*config,\s*explicitName,\s*null,",
         session_start_body,
     )
-    assert 'notify("[inter-agent] connecting", `as ${explicitName}`)' in session_start_body
+    assert '"[inter-agent] connecting"' in session_start_body
+    assert 'to inter-agent message bus as "${explicitName}"' in session_start_body
 
     # The restored-state branch is only reached when the flag is absent.
     assert "if (state?.connected)" in session_start_body
-    assert 'notify("[inter-agent] reconnecting", `as ${state.name}`)' in session_start_body
+    assert '"[inter-agent] reconnecting"' in session_start_body
+    assert 'to inter-agent message bus as "${state.name}"' in session_start_body
 
 
 def test_pi_extension_startup_flag_reuses_existing_connect_path() -> None:
@@ -690,7 +692,8 @@ def test_pi_extension_omitted_flag_preserves_existing_reconnect_behavior() -> No
         r"startListener\(\s*pi,\s*ctx,\s*config,\s*state\.name,\s*state\.label,",
         session_start_body,
     )
-    assert 'notify("[inter-agent] reconnecting", `as ${state.name}`)' in session_start_body
+    assert '"[inter-agent] reconnecting"' in session_start_body
+    assert 'to inter-agent message bus as "${state.name}"' in session_start_body
 
     # The flag branch returns early, so the restored-state branch is skipped.
     flag_branch = session_start_body.split("if (flagPresent)", 1)[1]

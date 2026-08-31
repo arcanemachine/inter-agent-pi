@@ -822,20 +822,20 @@ test("connection transitions notify the model without triggering a turn", async 
       assert.equal(connected.length, 1);
       assert.equal(
         connected[0].message.content,
-        "[inter-agent] connected: as rx",
+        'Connected to inter-agent message bus as "rx".',
       );
-      assert.equal(connected[0].message.display, false);
+      assert.equal(connected[0].message.display, true);
       assert.deepEqual(connected[0].message.details, {
         status: "connected",
-        body: "as rx",
       });
+      assert.ok(pi.renderers.has("inter-agent-status"));
       assert.deepEqual(connected[0].options, {
         triggerTurn: false,
-        deliverAs: "nextTurn",
+        deliverAs: "followUp",
       });
       assert.ok(
-        pi.notifyLog.some((entry) =>
-          entry.message.includes("[inter-agent] connected: as rx"),
+        !pi.notifyLog.some((entry) =>
+          entry.message.includes("Connected to inter-agent message bus"),
         ),
       );
 
@@ -844,16 +844,15 @@ test("connection transitions notify the model without triggering a turn", async 
       assert.equal(statuses.length, 2);
       assert.equal(
         statuses[1].message.content,
-        "[inter-agent] disconnected: listener stopped",
+        "Disconnected from inter-agent message bus.",
       );
-      assert.equal(statuses[1].message.display, false);
+      assert.equal(statuses[1].message.display, true);
       assert.deepEqual(statuses[1].message.details, {
         status: "disconnected",
-        body: "listener stopped",
       });
       assert.deepEqual(statuses[1].options, {
         triggerTurn: false,
-        deliverAs: "nextTurn",
+        deliverAs: "followUp",
       });
 
       // Repeating disconnect while already disconnected keeps the model quiet.
@@ -878,15 +877,41 @@ test("unexpected listener exit notifies the model of disconnection", async () =>
       const statuses = connectionStatuses(pi);
       assert.equal(statuses.length, 2);
       assert.equal(statuses[1].message.customType, "inter-agent-status");
-      assert.match(
+      assert.equal(
         statuses[1].message.content,
-        /^\[inter-agent\] disconnected: server connection closed\./,
+        "Disconnected from inter-agent message bus.",
       );
-      assert.equal(statuses[1].message.display, false);
+      assert.equal(statuses[1].message.display, true);
       assert.deepEqual(statuses[1].options, {
         triggerTurn: false,
-        deliverAs: "nextTurn",
+        deliverAs: "followUp",
       });
+    },
+  );
+});
+
+test("unexpected listener failure uses one status notification", async () => {
+  await withEnv(
+    { project: { projectPath: process.cwd(), deliveryMode: "queued" } },
+    async ({ pi, listeners }) => {
+      const cmd = interAgentCommand(pi);
+      await cmd.handler("connect rx", pi.ctx);
+      const listener = listeners[listeners.length - 1];
+      listener.emitStdout(JSON.stringify({ op: "welcome" }) + "\n");
+      await tick();
+      listener.exit(7);
+      await tick();
+
+      const statuses = connectionStatuses(pi);
+      assert.equal(statuses.length, 2);
+      assert.match(
+        statuses[1].message.content,
+        /^Disconnected from inter-agent message bus\. Listener exited: code 7\./,
+      );
+      assert.equal(
+        pi.notifyLog.some((entry) => entry.message.includes("listener exited")),
+        false,
+      );
     },
   );
 });
