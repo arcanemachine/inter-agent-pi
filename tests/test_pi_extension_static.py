@@ -627,13 +627,13 @@ def test_pi_extension_startup_flag_takes_precedence_over_restored_state() -> Non
         r"startListener\(\s*pi,\s*ctx,\s*config,\s*explicitName,\s*null,",
         session_start_body,
     )
-    assert '"[inter-agent] connecting"' in session_start_body
-    assert 'to inter-agent message bus as "${explicitName}"' in session_start_body
+    assert '"[inter-agent] connecting"' not in session_start_body
+    assert 'to inter-agent message bus as "${explicitName}"' not in session_start_body
 
     # The restored-state branch is only reached when the flag is absent.
     assert "if (state?.connected)" in session_start_body
-    assert '"[inter-agent] reconnecting"' in session_start_body
-    assert 'to inter-agent message bus as "${state.name}"' in session_start_body
+    assert '"[inter-agent] reconnecting"' not in session_start_body
+    assert 'to inter-agent message bus as "${state.name}"' not in session_start_body
 
 
 def test_pi_extension_startup_flag_reuses_existing_connect_path() -> None:
@@ -692,8 +692,8 @@ def test_pi_extension_omitted_flag_preserves_existing_reconnect_behavior() -> No
         r"startListener\(\s*pi,\s*ctx,\s*config,\s*state\.name,\s*state\.label,",
         session_start_body,
     )
-    assert '"[inter-agent] reconnecting"' in session_start_body
-    assert 'to inter-agent message bus as "${state.name}"' in session_start_body
+    assert '"[inter-agent] reconnecting"' not in session_start_body
+    assert 'to inter-agent message bus as "${state.name}"' not in session_start_body
 
     # The flag branch returns early, so the restored-state branch is skipped.
     flag_branch = session_start_body.split("if (flagPresent)", 1)[1]

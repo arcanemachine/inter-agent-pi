@@ -833,11 +833,7 @@ test("connection transitions notify the model without triggering a turn", async 
         triggerTurn: false,
         deliverAs: "followUp",
       });
-      assert.ok(
-        !pi.notifyLog.some((entry) =>
-          entry.message.includes("Connected to inter-agent message bus"),
-        ),
-      );
+      assert.deepEqual(pi.notifyLog, []);
 
       await cmd.handler("disconnect", pi.ctx);
       const statuses = connectionStatuses(pi);
@@ -854,10 +850,42 @@ test("connection transitions notify the model without triggering a turn", async 
         triggerTurn: false,
         deliverAs: "followUp",
       });
+      assert.deepEqual(pi.notifyLog, []);
 
       // Repeating disconnect while already disconnected keeps the model quiet.
       await cmd.handler("disconnect", pi.ctx);
       assert.equal(connectionStatuses(pi).length, 2);
+      assert.deepEqual(pi.notifyLog, []);
+    },
+  );
+});
+
+test("replacing a listener emits one completed connection status", async () => {
+  await withEnv(
+    { project: { projectPath: process.cwd(), deliveryMode: "queued" } },
+    async ({ pi, listeners }) => {
+      const cmd = interAgentCommand(pi);
+      await cmd.handler("connect a", pi.ctx);
+      const listener1 = listeners[listeners.length - 1];
+      listener1.emitStdout(JSON.stringify({ op: "welcome" }) + "\n");
+      await tick();
+
+      await cmd.handler("connect b", pi.ctx);
+      const listener2 = listeners[listeners.length - 1];
+      listener2.emitStdout(JSON.stringify({ op: "welcome" }) + "\n");
+      await tick();
+
+      const statuses = connectionStatuses(pi);
+      assert.equal(statuses.length, 2);
+      assert.equal(
+        statuses[0].message.content,
+        'Connected to inter-agent message bus as "a".',
+      );
+      assert.equal(
+        statuses[1].message.content,
+        'Connected to inter-agent message bus as "b".',
+      );
+      assert.deepEqual(pi.notifyLog, []);
     },
   );
 });

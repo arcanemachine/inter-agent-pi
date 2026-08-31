@@ -749,7 +749,6 @@ async function ensureServerAvailable(
   }
 
   if (statusState(initial.payload) === "available") {
-    notify("[inter-agent] server detected", "connecting now");
     return true;
   }
 
@@ -762,7 +761,6 @@ async function ensureServerAvailable(
     return false;
   }
 
-  notify("[inter-agent] server not detected", "starting now");
   const started = await startServerProcess(scripts);
   if (started.ok === false) {
     notify("[inter-agent] connect failed", started.message, "error");
@@ -775,7 +773,6 @@ async function ensureServerAvailable(
     return false;
   }
 
-  notify("[inter-agent] server ready", "connecting now");
   return true;
 }
 
@@ -893,10 +890,6 @@ async function startListener(
     );
     return false;
   }
-  if (wasConnected) {
-    sendConnectionStatus(pi, "disconnected", DISCONNECTED_MESSAGE);
-  }
-
   const scripts = getScripts(config);
   if (scripts.unavailableMessage) {
     notify("[inter-agent] listener error", scripts.unavailableMessage, "error");
@@ -1683,15 +1676,9 @@ export default function (pi: ExtensionAPI) {
         }
         return;
       }
-      const started = await startListener(pi, ctx, config, explicitName, null, {
+      await startListener(pi, ctx, config, explicitName, null, {
         notifyOnReady: true,
       });
-      if (started) {
-        notify(
-          "[inter-agent] connecting",
-          `to inter-agent message bus as "${explicitName}"`,
-        );
-      }
       return;
     }
 
@@ -1703,22 +1690,9 @@ export default function (pi: ExtensionAPI) {
         updateStatus(ctx, { ...state, connected: false });
         return;
       }
-      const started = await startListener(
-        pi,
-        ctx,
-        config,
-        state.name,
-        state.label,
-        {
-          notifyOnReady: true,
-        },
-      );
-      if (started) {
-        notify(
-          "[inter-agent] reconnecting",
-          `to inter-agent message bus as "${state.name}"`,
-        );
-      }
+      await startListener(pi, ctx, config, state.name, state.label, {
+        notifyOnReady: true,
+      });
     }
   });
 
@@ -1888,11 +1862,6 @@ export default function (pi: ExtensionAPI) {
       },
     );
     if (!started) return;
-
-    notify(
-      "[inter-agent] connecting",
-      `to inter-agent message bus as "${parsed.name}"${parsed.label ? ` (${parsed.label})` : ""}`,
-    );
   }
 
   async function handleDisconnect(_args: string, ctx: ExtensionContext) {
@@ -1967,7 +1936,6 @@ export default function (pi: ExtensionAPI) {
       return;
     }
 
-    const oldName = currentConnection.name;
     const label = parsed.label ?? currentConnection.label;
     const ready = await ensureServerAvailable(currentScripts());
     if (!ready) return;
@@ -1987,11 +1955,6 @@ export default function (pi: ExtensionAPI) {
       );
       return;
     }
-
-    notify(
-      "[inter-agent] renaming",
-      `inter-agent message bus connection from "${oldName}" to "${parsed.name}"${label ? ` (${label})` : ""}`,
-    );
   }
 
   async function handleSend(args: string, _ctx: ExtensionContext) {
