@@ -5,11 +5,15 @@ This repository begins with a clean one-commit history; the baseline below is
 the split-generation source extracted from the coordinated monorepo
 `0.2.0` split generation.
 
-## 0.3.2 — Pi control release candidate
+## 0.3.2 — Pi control and connection status release
 
 - Prepared the public-API Pi control implementation for npm `0.3.2` and
   Python helper `0.3.1` after the previously published versions were found to
   lack the control bridge.
+- Added one persistent, model-visible connection status notification for each
+  completed connect or disconnect action without triggering an agent turn.
+- Removed duplicate connection progress notices and render both connection
+  states with Pi's standard custom-message text style.
 
 ## 0.3.1 — npm publish checks
 
