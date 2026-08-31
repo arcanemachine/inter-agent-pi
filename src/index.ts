@@ -1480,14 +1480,9 @@ export default function (pi: ExtensionAPI) {
   pi.registerMessageRenderer<{
     status?: "connected" | "disconnected";
   }>("inter-agent-status", (message, _options, theme) => {
-    const details =
-      typeof message.details === "object" && message.details !== null
-        ? (message.details as { status?: "connected" | "disconnected" })
-        : undefined;
-    const color = details?.status === "disconnected" ? "warning" : "success";
     const content = typeof message.content === "string" ? message.content : "";
     const box = new Box(1, 1, (t) => theme.bg("customMessageBg", t));
-    box.addChild(new Text(theme.fg(color, content), 0, 0));
+    box.addChild(new Text(theme.fg("customMessageText", content), 0, 0));
     return box as unknown as Component;
   });
 

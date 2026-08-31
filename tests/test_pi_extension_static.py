@@ -220,6 +220,7 @@ def test_pi_extension_sends_connection_status_to_model_without_turn() -> None:
     assert "Connected to inter-agent message bus as" in content
     assert "Disconnected from inter-agent message bus." in content
     assert 'pi.registerMessageRenderer<{\n    status?: "connected" | "disconnected";' in content
+    assert 'theme.fg("customMessageText", content)' in content
 
 
 def test_pi_extension_send_command_gates_on_connection() -> None:
