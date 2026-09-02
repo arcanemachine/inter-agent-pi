@@ -5,6 +5,10 @@ This repository begins with a clean one-commit history; the baseline below is
 the split-generation source extracted from the coordinated monorepo
 `0.2.0` split generation.
 
+## 0.3.3
+
+- Use smaller logo.
+
 ## 0.3.2 — Pi control and connection status release
 
 - Prepared the public-API Pi control implementation for npm `0.3.2` and
