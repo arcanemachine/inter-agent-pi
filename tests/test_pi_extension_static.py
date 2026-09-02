@@ -566,7 +566,7 @@ def test_pi_package_declares_pi_runtime_peers() -> None:
     assert manifest["pi"]["extensions"] == ["./src/index.ts"]
     assert (
         manifest["pi"]["image"]
-        == "https://raw.githubusercontent.com/arcanemachine/inter-agent-pi/main/logo.png"
+        == "https://raw.githubusercontent.com/arcanemachine/inter-agent-pi/main/logo.jpg"
     )
     assert "typebox" not in manifest.get("dependencies", {})
     assert manifest["devDependencies"]["typebox"] == "1.1.38"

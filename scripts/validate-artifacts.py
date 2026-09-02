@@ -17,7 +17,7 @@ from pathlib import Path
 
 EXPECTED_NPM_NAME = "@arcanemachine/inter-agent-pi"
 EXPECTED_NPM_VERSION = "0.3.2"
-EXPECTED_PI_IMAGE = "https://raw.githubusercontent.com/arcanemachine/inter-agent-pi/main/logo.png"
+EXPECTED_PI_IMAGE = "https://raw.githubusercontent.com/arcanemachine/inter-agent-pi/main/logo.jpg"
 EXPECTED_PY_NAME = "inter-agent-pi"
 EXPECTED_PY_VERSION = "0.3.1"
 EXPECTED_CORE_DEP = "inter-agent-core==0.3.0"

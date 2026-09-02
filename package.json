@@ -32,7 +32,7 @@
     "extensions": [
       "./src/index.ts"
     ],
-    "image": "https://raw.githubusercontent.com/arcanemachine/inter-agent-pi/main/logo.png"
+    "image": "https://raw.githubusercontent.com/arcanemachine/inter-agent-pi/main/logo.jpg"
   },
   "author": "Nicholas Moen",
   "license": "MIT",

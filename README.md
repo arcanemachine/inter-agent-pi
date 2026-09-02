@@ -1,7 +1,7 @@
 # inter-agent for Pi
 
 <p align="center">
-  <img src="https://raw.githubusercontent.com/arcanemachine/inter-agent-pi/main/logo.png" alt="inter-agent for Pi logo" width="250" />
+  <img src="https://raw.githubusercontent.com/arcanemachine/inter-agent-pi/main/logo.jpg" alt="inter-agent for Pi logo" width="250" />
 </p>
 
 [`@arcanemachine/inter-agent-pi`](https://www.npmjs.com/package/@arcanemachine/inter-agent-pi) connects a [Pi](https://github.com/earendil-works/pi/tree/main/packages/coding-agent) session to the local [inter-agent](https://github.com/arcanemachine/inter-agent) message bus.
