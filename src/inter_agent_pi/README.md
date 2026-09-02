@@ -2,6 +2,18 @@
 
 Pi-facing command UX built on top of the universal core protocol. Pi users should run `inter-agent-pi` commands rather than the lower-level core protocol commands.
 
+The command examples below use `uv run` from a source checkout. For the
+released managed installation, invoke the same commands through
+`$HOME/.pi/agent/inter-agent/venv/bin/inter-agent-pi` instead. For example:
+
+```bash
+"$HOME/.pi/agent/inter-agent/venv/bin/inter-agent-pi" status --json
+```
+
+Before a server is running, `status` reports an unavailable state and exits
+successfully so scripts can inspect the JSON result. After the listener
+connects, it should report an available state.
+
 ## Commands
 
 Run Pi adapter commands through the installed package entry point:

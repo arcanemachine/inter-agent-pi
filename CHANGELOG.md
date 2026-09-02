@@ -5,6 +5,13 @@ This repository begins with a clean one-commit history; the baseline below is
 the split-generation source extracted from the coordinated monorepo
 `0.2.0` split generation.
 
+## 0.3.4
+
+- Clarify released helper and extension setup, version pairing, verification,
+  helper selection, and recovery guidance.
+- Synchronize the tracked npm lockfile metadata with the published extension
+  version.
+
 ## 0.3.3
 
 - Use smaller logo.

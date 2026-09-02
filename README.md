@@ -22,22 +22,41 @@ with the host version already installed.
 
 ## Install
 
-Install the Python helper into the managed environment used by the extension:
+Use this canonical setup for a released installation:
+
+1. Create a dedicated helper environment and install the released Python helper:
+
+   ```bash
+   uv venv "$HOME/.pi/agent/inter-agent/venv"
+   uv pip install \
+     --python "$HOME/.pi/agent/inter-agent/venv/bin/python" \
+     inter-agent-pi==0.3.1
+   ```
+
+2. Install the released Pi extension:
+
+   ```text
+   pi install npm:@arcanemachine/inter-agent-pi@0.3.4
+   ```
+
+The npm extension and Python helper are published separately. These examples
+pair extension `0.3.4` with helper `0.3.1`; keep both installed when following
+the released path. The helper installs its compatible `inter-agent-core`
+runtime automatically.
+
+Installation and bus connectivity are separate: the commands above install
+local package files, but do not start a server or connect a Pi session. The
+first `/inter-agent connect` starts a healthy local Core server when needed.
+
+Before opening Pi, verify the helper and inspect its current server state:
 
 ```bash
-uv venv ~/.pi/agent/inter-agent/venv
-uv pip install \
-  --python ~/.pi/agent/inter-agent/venv/bin/python \
-  inter-agent-pi
+"$HOME/.pi/agent/inter-agent/venv/bin/inter-agent-pi" status --json
 ```
 
-Then install the released Pi package:
-
-```bash
-pi install npm:@arcanemachine/inter-agent-pi
-```
-
-The helper installs its compatible `inter-agent-core` runtime automatically. You can install the package from Git instead:
+A state of `"unavailable"` is expected before a server is running. After a
+successful connection, the same check should report `"available"`. You can
+install the package from Git instead for source development:
 
 ```bash
 pi install https://github.com/arcanemachine/inter-agent-pi
@@ -198,11 +217,44 @@ The default bus endpoint is `127.0.0.1:16837`. Local sessions share endpoint, st
 
 Pi reads `interAgent` settings from global `~/.pi/agent/settings.json`, then project `.pi/settings.json`; project values override individual global values. Supported keys include `host`, `port`, `dataDir`, `secret`, `tls`, `tlsCert`, `tlsKey`, `projectPath`, `deliveryMode`, and `mailboxNoticeDebounceMs`.
 
-If setup fails, check that the selected helper bin provides `inter-agent-pi`, `inter-agent-connect`, and `inter-agent-server`. If the server is unavailable, run `/inter-agent status`; if authentication fails, ensure the server and clients use the same endpoint, state directory, and secret. Use a separate endpoint and data directory for tests.
+When selecting the helper, the extension uses this precedence:
+
+1. `INTER_AGENT_PI_HELPER`, when set. It must point to the executable
+   `inter-agent-pi` next to the matching `inter-agent-connect` and
+   `inter-agent-server`; an invalid override fails closed.
+2. An explicitly configured `interAgent.projectPath`, using that checkout's
+   `.venv/bin` scripts; a missing configured helper fails closed.
+3. The managed Pi environment at `$HOME/.pi/agent/inter-agent/venv/bin`.
+4. Matching `inter-agent-*` scripts found on `PATH`.
+
+If setup fails, check that the selected helper bin provides `inter-agent-pi`,
+`inter-agent-connect`, and `inter-agent-server`. If the server is unavailable,
+run `/inter-agent status`; if authentication fails, ensure the server and
+clients use the same endpoint, state directory, and secret. Use a separate
+endpoint and data directory for tests.
+
+For a managed-install recovery, recreate only the helper environment and then
+reinstall the released helper and extension:
+
+```bash
+rm -rf "$HOME/.pi/agent/inter-agent/venv"
+uv venv "$HOME/.pi/agent/inter-agent/venv"
+uv pip install \
+  --python "$HOME/.pi/agent/inter-agent/venv/bin/python" \
+  inter-agent-pi==0.3.1
+pi install npm:@arcanemachine/inter-agent-pi@0.3.4
+```
+
+This removes the managed Python environment, not Pi settings, Core state,
+or unread mailbox data. A virtual environment is specific to its machine and
+Python installation; do not copy one between environments. For a source
+checkout, use its own `uv sync --locked` environment and the source-development
+helper override described below instead of deleting the managed environment.
 
 ## Development and security
 
-For source development:
+For source development, use a checkout-local environment rather than the
+managed released helper:
 
 ```bash
 git clone https://github.com/arcanemachine/inter-agent-pi

@@ -196,13 +196,12 @@ secret, or local state remains inside the accepted trust model.
 
 ## Verified composition
 
-The optional composition was exercised with `pi-session-manager` `0.1.1`
-(child commit `44461a7`), accepted local `inter-agent-pi` commit `01b5bf2`, Pi
-`0.84.2`, and tmux `3.5a`. The trial created ordinary visible Pi TUIs in a
-dedicated fleet, established readiness through inter-agent presence, exercised
-visible prompt/steer/follow-up/abort behavior, observed graceful target exit,
-and used retained-pane/dead-only cleanup. The exact structured unauthorized
-response remains covered by the provider-free inter-agent control smoke; the
-composition trial intentionally did not reproduce that response in a no-tools
-controller. It found no Session Manager dependency, semantic coupling, default
-tmux mutation, key injection, or credential exposure.
+The optional composition is supported when readiness is established through
+inter-agent presence and structured control responses rather than process
+existence or pane text. Prompt, steer, follow-up, abort, state, and graceful
+shutdown retain the ownership and lifecycle boundaries described above.
+
+The provider-free inter-agent control checks cover the structured authorization
+response. Session Manager remains optional: it does not become a runtime
+dependency, change the default tmux server, inject terminal input, or handle
+bus credentials.
