@@ -560,7 +560,7 @@ def test_pi_package_declares_pi_runtime_peers() -> None:
     manifest = json.loads(PI_PACKAGE.read_text(encoding="utf-8"))
 
     assert manifest["name"] == "@arcanemachine/inter-agent-pi"
-    assert manifest["version"] == "0.3.2"
+    assert manifest["version"] == "0.3.3"
     assert manifest.get("private") is not True
     assert "pi-package" in manifest["keywords"]
     assert manifest["pi"]["extensions"] == ["./src/index.ts"]
