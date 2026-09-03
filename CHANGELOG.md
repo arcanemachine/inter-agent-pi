@@ -5,6 +5,15 @@ This repository begins with a clean one-commit history; the baseline below is
 the split-generation source extracted from the coordinated monorepo
 `0.2.0` split generation.
 
+## Unreleased
+
+- **Breaking:** replace the singular `interAgent.projectPath` setting with the
+  list-only `interAgent.projectPaths` setting. Candidates are checked in list
+  order, while relative paths are resolved against the settings file that
+  contains the list; the first complete helper checkout is selected. Malformed
+  lists, missing candidates, and the former key fail closed with migration
+  guidance.
+
 ## 0.3.4
 
 - Clarify released helper and extension setup, version pairing, verification,

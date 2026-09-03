@@ -215,19 +215,46 @@ The default bus endpoint is `127.0.0.1:16837`. Local sessions share endpoint, st
 
 ## Configuration and recovery
 
-Pi reads `interAgent` settings from global `~/.pi/agent/settings.json`, then project `.pi/settings.json`; project values override individual global values. Supported keys include `host`, `port`, `dataDir`, `secret`, `tls`, `tlsCert`, `tlsKey`, `projectPath`, `deliveryMode`, and `mailboxNoticeDebounceMs`.
+Pi reads `interAgent` settings from global `~/.pi/agent/settings.json`, then
+project `.pi/settings.json`; project values override individual global values.
+Supported keys include `host`, `port`, `dataDir`, `secret`, `tls`, `tlsCert`,
+`tlsKey`, `projectPaths`, `deliveryMode`, and `mailboxNoticeDebounceMs`.
+
+`projectPaths` is always a non-empty list of non-empty checkout-path strings.
+Each candidate is
+resolved relative to the settings file that contains the list, and `~` expands
+to the home directory. A shared settings file can therefore name both host and
+container checkouts:
+
+```json
+{
+  "interAgent": {
+    "projectPaths": [
+      "/host/path/to/inter-agent-pi",
+      "/container/path/to/inter-agent-pi"
+    ]
+  }
+}
+```
 
 When selecting the helper, the extension uses this precedence:
 
 1. `INTER_AGENT_PI_HELPER`, when set. It must point to the executable
    `inter-agent-pi` next to the matching `inter-agent-connect` and
    `inter-agent-server`; an invalid override fails closed.
-2. An explicitly configured `interAgent.projectPath`, using that checkout's
-   `.venv/bin` scripts; a missing configured helper fails closed.
+2. An explicitly configured `interAgent.projectPaths` list. Candidates are
+   checked in order, and the first checkout whose `.venv/bin` provides all
+   three executable scripts is selected. A malformed list or a list with no
+   valid candidate fails closed; it does not fall through to another helper.
 3. The managed Pi environment at `$HOME/.pi/agent/inter-agent/venv/bin`.
 4. Matching `inter-agent-*` scripts found on `PATH`.
 
-If setup fails, check that the selected helper bin provides `inter-agent-pi`,
+Project settings replace the complete global `projectPaths` list; the lists
+are not concatenated. The former singular `projectPath` key is no longer
+supported and fails closed with migration guidance; use the list form instead.
+Cwd-based project discovery is not part of this setting. If setup fails, check
+that each configured candidate's `.venv/bin` (or the managed/PATH helper)
+provides `inter-agent-pi`,
 `inter-agent-connect`, and `inter-agent-server`. If the server is unavailable,
 run `/inter-agent status`; if authentication fails, ensure the server and
 clients use the same endpoint, state directory, and secret. Use a separate

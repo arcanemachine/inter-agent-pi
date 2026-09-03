@@ -207,7 +207,7 @@ function setupEnv(): { pi: FakePi; home: string; cwd: string } {
   mkdirSync(join(cwd, ".pi"), { recursive: true });
   writeFileSync(
     join(cwd, ".pi", "settings.json"),
-    JSON.stringify({ interAgent: { projectPath: cwd } }),
+    JSON.stringify({ interAgent: { projectPaths: [cwd] } }),
   );
   return { pi: new FakePi(), home, cwd };
 }

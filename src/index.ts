@@ -90,8 +90,9 @@ import type {
 // ── Configuration ───────────────────────────────────────────────────────────
 
 interface InterAgentConfig {
-  projectPath?: string;
-  projectPathExplicit?: boolean;
+  projectPaths?: string[];
+  projectPathsExplicit?: boolean;
+  projectPathsError?: string;
   host?: string;
   port?: number | string;
   dataDir?: string;
@@ -103,8 +104,16 @@ interface InterAgentConfig {
   mailboxNoticeDebounceMs?: number;
 }
 
+interface RawInterAgentConfig extends Omit<
+  InterAgentConfig,
+  "projectPaths" | "projectPathsExplicit" | "projectPathsError"
+> {
+  projectPaths?: unknown;
+  projectPath?: unknown;
+}
+
 interface Settings {
-  interAgent?: InterAgentConfig;
+  interAgent?: RawInterAgentConfig;
 }
 
 const MANAGED_RUNTIME_VENV = join(
@@ -115,6 +124,10 @@ const MANAGED_RUNTIME_VENV = join(
   "venv",
 );
 const RUNTIME_SETUP_DOCS = "README.md";
+const PROJECT_PATHS_CONFIG_ERROR =
+  "interAgent.projectPaths must be a non-empty list of non-empty strings";
+const LEGACY_PROJECT_PATH_ERROR =
+  "interAgent.projectPath is no longer supported; use interAgent.projectPaths with a list of checkout paths";
 
 function expandHome(path: string): string {
   if (path === "~") return homedir();
@@ -128,32 +141,92 @@ function resolvePathOption(path: string | undefined, baseDir: string) {
   return isAbsolute(expanded) ? expanded : resolve(baseDir, expanded);
 }
 
+function resolveProjectPaths(
+  value: unknown,
+  baseDir: string,
+): { paths?: string[]; error?: string } {
+  if (
+    !Array.isArray(value) ||
+    value.length === 0 ||
+    !value.every(
+      (candidate): candidate is string =>
+        typeof candidate === "string" && candidate.trim().length > 0,
+    )
+  ) {
+    return { error: PROJECT_PATHS_CONFIG_ERROR };
+  }
+
+  return {
+    paths: value.map((candidate) => resolvePathOption(candidate, baseDir)!),
+  };
+}
+
 function resolveConfigPaths(
-  config: InterAgentConfig,
+  config: RawInterAgentConfig,
   settingsPath: string,
 ): InterAgentConfig {
   const baseDir = dirname(settingsPath);
-  return {
-    ...config,
-    projectPath: resolvePathOption(config.projectPath, baseDir),
-    dataDir: resolvePathOption(config.dataDir, baseDir),
-    tlsCert: resolvePathOption(config.tlsCert, baseDir),
-    tlsKey: resolvePathOption(config.tlsKey, baseDir),
-  };
+  const {
+    projectPath: _legacyProjectPath,
+    projectPaths: rawProjectPaths,
+    ...rest
+  } = config;
+  const resolved: InterAgentConfig = { ...rest };
+  if (Object.prototype.hasOwnProperty.call(config, "dataDir")) {
+    resolved.dataDir = resolvePathOption(config.dataDir, baseDir);
+  }
+  if (Object.prototype.hasOwnProperty.call(config, "tlsCert")) {
+    resolved.tlsCert = resolvePathOption(config.tlsCert, baseDir);
+  }
+  if (Object.prototype.hasOwnProperty.call(config, "tlsKey")) {
+    resolved.tlsKey = resolvePathOption(config.tlsKey, baseDir);
+  }
+
+  if (Object.prototype.hasOwnProperty.call(config, "projectPath")) {
+    return {
+      ...resolved,
+      projectPaths: undefined,
+      projectPathsError: LEGACY_PROJECT_PATH_ERROR,
+    };
+  }
+
+  if (Object.prototype.hasOwnProperty.call(config, "projectPaths")) {
+    const normalized = resolveProjectPaths(rawProjectPaths, baseDir);
+    return {
+      ...resolved,
+      projectPaths: normalized.paths,
+      projectPathsError: normalized.error,
+    };
+  }
+
+  return resolved;
 }
 
 function mergeConfig(
   current: InterAgentConfig,
-  next: InterAgentConfig,
+  next: RawInterAgentConfig,
   settingsPath: string,
 ): InterAgentConfig {
   const resolved = resolveConfigPaths(next, settingsPath);
+  const hasProjectPaths = Object.prototype.hasOwnProperty.call(
+    next,
+    "projectPaths",
+  );
+  const hasLegacyProjectPath = Object.prototype.hasOwnProperty.call(
+    next,
+    "projectPath",
+  );
   return {
     ...current,
     ...resolved,
-    projectPathExplicit:
-      Object.prototype.hasOwnProperty.call(next, "projectPath") ||
-      current.projectPathExplicit === true,
+    projectPathsExplicit:
+      hasProjectPaths ||
+      hasLegacyProjectPath ||
+      current.projectPathsExplicit === true,
+    projectPathsError:
+      hasProjectPaths || hasLegacyProjectPath
+        ? resolved.projectPathsError
+        : current.projectPathsError,
   };
 }
 
@@ -243,8 +316,9 @@ function pathScripts(): InterAgentScripts | null {
   return { pi, connect, server };
 }
 
-function missingConfiguredRuntimeMessage(path: string): string {
-  return `inter-agent runtime was not found at ${path}. See ${RUNTIME_SETUP_DOCS}`;
+function missingConfiguredProjectPathsMessage(paths: string[]): string {
+  const binDirs = paths.map((path) => join(path, ".venv", "bin"));
+  return `inter-agent runtime was not found in configured projectPaths candidates: ${binDirs.join(", ")}. See ${RUNTIME_SETUP_DOCS}`;
 }
 
 function setupNeededMessage(): string {
@@ -265,16 +339,25 @@ function getScripts(config: InterAgentConfig): InterAgentScripts {
     return scripts;
   }
 
-  if (config.projectPathExplicit && config.projectPath) {
-    const binDir = join(config.projectPath, ".venv", "bin");
-    const scripts = scriptsFromBinDir(binDir);
-    if (!scriptsAvailable(scripts)) {
+  if (config.projectPathsExplicit) {
+    const managedScripts = scriptsFromBinDir(join(MANAGED_RUNTIME_VENV, "bin"));
+    if (config.projectPathsError) {
       return {
-        ...scripts,
-        unavailableMessage: missingConfiguredRuntimeMessage(binDir),
+        ...managedScripts,
+        unavailableMessage: `${config.projectPathsError}. See ${RUNTIME_SETUP_DOCS}`,
       };
     }
-    return scripts;
+
+    const projectPaths = config.projectPaths ?? [];
+    for (const projectPath of projectPaths) {
+      const scripts = scriptsFromBinDir(join(projectPath, ".venv", "bin"));
+      if (scriptsAvailable(scripts)) return scripts;
+    }
+
+    return {
+      ...managedScripts,
+      unavailableMessage: missingConfiguredProjectPathsMessage(projectPaths),
+    };
   }
 
   const managedScripts = scriptsFromBinDir(join(MANAGED_RUNTIME_VENV, "bin"));

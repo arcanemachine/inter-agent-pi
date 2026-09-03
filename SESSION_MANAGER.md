@@ -66,16 +66,25 @@ without relying on a per-worker environment override:
     "port": 16837,
     "dataDir": "/tmp/inter-agent-session-manager/data",
     "secret": "<local secret; do not commit>",
-    "projectPath": "/path/to/inter-agent-pi"
+    "projectPaths": [
+      "/host/path/to/inter-agent-pi",
+      "/container/path/to/inter-agent-pi"
+    ]
   }
 }
 ```
 
-`projectPath` makes the extension use that checkout's `.venv/bin` helper
-scripts. Use a short data path when the platform's Unix socket path limit makes
-a deeply nested temporary directory fail. The Session Manager package has no
-per-worker environment override, so create separate temporary working
-folders when workers need separate project settings.
+`projectPaths` is always a non-empty list of non-empty checkout-path strings.
+The extension resolves each candidate relative
+to the settings file, checks candidates in order, and uses the first checkout
+whose `.venv/bin` provides executable `inter-agent-pi`,
+`inter-agent-connect`, and `inter-agent-server`. A malformed list or a list
+with no valid candidate fails closed rather than falling through to another
+helper. The former singular `projectPath` key is not supported; migrate it to
+this list form. Use a short data path when the platform's Unix socket path
+limit makes a deeply nested temporary directory fail. The Session Manager
+package has no per-worker environment override, so create separate temporary
+working folders when workers need separate project settings.
 
 Create one ordinary interactive Pi instance per worker. `piArgs` is an opaque
 array passed directly to `pi`; it is not shell syntax and Session Manager does
@@ -185,8 +194,9 @@ viewed pane.
   was explicitly requested.
 - **Unexpected terminal output:** treat it as observation and use inter-agent
   state/control responses for semantics.
-- **Helper setup failure:** verify that the selected project path or helper bin
-  provides `inter-agent-pi`, `inter-agent-connect`, and `inter-agent-server`.
+- **Helper setup failure:** verify that each configured projectPaths
+  candidate's `.venv/bin` (or the managed/PATH helper) provides
+  `inter-agent-pi`, `inter-agent-connect`, and `inter-agent-server`.
 - **Socket path failure:** move isolated bus data and temporary worker folders
   to a short path; do not switch to the user's default tmux server.
 

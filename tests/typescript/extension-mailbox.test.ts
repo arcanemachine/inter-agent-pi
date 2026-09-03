@@ -275,17 +275,27 @@ function tick(ms = 0): Promise<void> {
 function setupEnv(opts: {
   global?: Record<string, unknown>;
   project?: Record<string, unknown>;
+  validProjectPaths?: string[];
 }): { pi: FakePi; home: string; cwd: string } {
   const home = mkdtempSync(join(tmpdir(), "ia-home-"));
   const cwd = mkdtempSync(join(tmpdir(), "ia-cwd-"));
-  mkdirSync(join(cwd, ".venv", "bin"), { recursive: true });
-  for (const name of [
-    "inter-agent-pi",
-    "inter-agent-connect",
-    "inter-agent-server",
-  ]) {
-    writeFileSync(join(cwd, ".venv", "bin", name), "#!/bin/sh\nexit 0\n");
-    chmodSync(join(cwd, ".venv", "bin", name), 0o755);
+  const validProjectPaths = opts.validProjectPaths ?? [cwd];
+  for (const projectPath of validProjectPaths) {
+    const resolvedProjectPath = isAbsolute(projectPath)
+      ? projectPath
+      : join(cwd, projectPath);
+    mkdirSync(join(resolvedProjectPath, ".venv", "bin"), { recursive: true });
+    for (const name of [
+      "inter-agent-pi",
+      "inter-agent-connect",
+      "inter-agent-server",
+    ]) {
+      writeFileSync(
+        join(resolvedProjectPath, ".venv", "bin", name),
+        "#!/bin/sh\nexit 0\n",
+      );
+      chmodSync(join(resolvedProjectPath, ".venv", "bin", name), 0o755);
+    }
   }
   mkdirSync(join(home, ".pi", "agent"), { recursive: true });
   if (opts.global) {
@@ -294,26 +304,37 @@ function setupEnv(opts: {
       JSON.stringify({ interAgent: opts.global }),
     );
   }
-  // Project settings always anchor getScripts at the temp .venv/bin stubs so
+  // Project settings always anchor getScripts at the temp project paths so
   // the faked connect/status flow resolves without a real inter-agent install.
+  const project = { ...(opts.project ?? {}) };
+  if (
+    !Object.prototype.hasOwnProperty.call(project, "projectPaths") &&
+    !Object.prototype.hasOwnProperty.call(project, "projectPath")
+  ) {
+    project.projectPaths = [cwd];
+  }
   mkdirSync(join(cwd, ".pi"), { recursive: true });
   writeFileSync(
     join(cwd, ".pi", "settings.json"),
-    JSON.stringify({
-      interAgent: { ...(opts.project ?? {}), projectPath: cwd },
-    }),
+    JSON.stringify({ interAgent: project }),
   );
   return { pi: new FakePi(), home, cwd };
 }
 
 function withEnv(
-  opts: { global?: Record<string, unknown>; project?: Record<string, unknown> },
+  opts: {
+    global?: Record<string, unknown>;
+    project?: Record<string, unknown>;
+    validProjectPaths?: string[];
+  },
   fn: (api: { pi: FakePi; listeners: FakeChildProcess[] }) => Promise<void>,
 ): Promise<void> {
   return (async () => {
     const env = setupEnv(opts);
     const oldHome = process.env.HOME;
+    const oldHelper = process.env.INTER_AGENT_PI_HELPER;
     const oldCwd = process.cwd();
+    delete process.env.INTER_AGENT_PI_HELPER;
     process.env.HOME = env.home;
     process.chdir(env.cwd);
     // spawn is fully faked; getScripts resolves the project .venv/bin stubs so
@@ -366,6 +387,8 @@ function withEnv(
       await fn({ pi: env.pi, listeners });
     } finally {
       await runHandler(env.pi, "session_shutdown");
+      if (oldHelper === undefined) delete process.env.INTER_AGENT_PI_HELPER;
+      else process.env.INTER_AGENT_PI_HELPER = oldHelper;
       process.env.HOME = oldHome;
       _setSpawnForTest(null);
       process.chdir(oldCwd);
@@ -625,9 +648,185 @@ test("invalid config keys warn exactly once after UI context is available", asyn
   );
 });
 
+test("projectPaths selects the first valid configured helper", async () => {
+  await withEnv(
+    {
+      project: { projectPaths: ["../first", "../second"] },
+      validProjectPaths: ["first", "second"],
+    },
+    async ({ pi, listeners }) => {
+      const cmd = interAgentCommand(pi);
+      await cmd.handler("connect rx", pi.ctx);
+      assert.equal(listeners.length, 1);
+      assert.equal(
+        listeners[0].spawnCmd,
+        join(process.cwd(), "first", ".venv", "bin", "inter-agent-pi"),
+      );
+    },
+  );
+});
+
+test("projectPaths skips invalid candidates and selects the first valid later candidate", async () => {
+  await withEnv(
+    {
+      project: { projectPaths: ["../missing", "../second", "../third"] },
+      validProjectPaths: ["second", "third"],
+    },
+    async ({ pi, listeners }) => {
+      const cmd = interAgentCommand(pi);
+      await cmd.handler("connect rx", pi.ctx);
+      assert.equal(listeners.length, 1);
+      assert.equal(
+        listeners[0].spawnCmd,
+        join(process.cwd(), "second", ".venv", "bin", "inter-agent-pi"),
+      );
+    },
+  );
+});
+
+test("project settings replace global projectPaths", async () => {
+  const globalPath = mkdtempSync(join(tmpdir(), "ia-global-project-"));
+  const projectPath = mkdtempSync(join(tmpdir(), "ia-project-project-"));
+  try {
+    await withEnv(
+      {
+        global: { projectPaths: [globalPath] },
+        project: { projectPaths: [projectPath] },
+        validProjectPaths: [globalPath, projectPath],
+      },
+      async ({ pi, listeners }) => {
+        const cmd = interAgentCommand(pi);
+        await cmd.handler("connect rx", pi.ctx);
+        assert.equal(listeners.length, 1);
+        assert.equal(
+          listeners[0].spawnCmd,
+          join(projectPath, ".venv", "bin", "inter-agent-pi"),
+        );
+      },
+    );
+  } finally {
+    rmSync(globalPath, { recursive: true, force: true });
+    rmSync(projectPath, { recursive: true, force: true });
+  }
+});
+
+test("projectPaths do not erase omitted global path settings", async () => {
+  const globalPath = mkdtempSync(join(tmpdir(), "ia-global-project-"));
+  const projectPath = mkdtempSync(join(tmpdir(), "ia-project-project-"));
+  try {
+    await withEnv(
+      {
+        global: {
+          dataDir: "/global-data",
+          projectPaths: [globalPath],
+          tlsCert: "/global-cert.pem",
+          tlsKey: "/global-key.pem",
+        },
+        project: { projectPaths: [projectPath] },
+        validProjectPaths: [globalPath, projectPath],
+      },
+      async ({ pi, listeners }) => {
+        const cmd = interAgentCommand(pi);
+        await cmd.handler("connect rx", pi.ctx);
+        const env = listeners[0].spawnEnv as Record<string, string | undefined>;
+        assert.equal(env.INTER_AGENT_DATA_DIR, "/global-data");
+        assert.equal(env.INTER_AGENT_TLS_CERT, "/global-cert.pem");
+        assert.equal(env.INTER_AGENT_TLS_KEY, "/global-key.pem");
+      },
+    );
+  } finally {
+    rmSync(globalPath, { recursive: true, force: true });
+    rmSync(projectPath, { recursive: true, force: true });
+  }
+});
+
+test("projectPaths resolve relative candidates from project settings", async () => {
+  await withEnv(
+    {
+      project: { projectPaths: ["../relative-helper"] },
+      validProjectPaths: ["relative-helper"],
+    },
+    async ({ pi, listeners }) => {
+      const cmd = interAgentCommand(pi);
+      await cmd.handler("connect rx", pi.ctx);
+      assert.equal(
+        listeners[0].spawnCmd,
+        join(
+          process.cwd(),
+          "relative-helper",
+          ".venv",
+          "bin",
+          "inter-agent-pi",
+        ),
+      );
+    },
+  );
+});
+
+test("malformed projectPaths fail closed without helper fallback", async () => {
+  for (const projectPaths of [null, [], ["  "], [42]]) {
+    await withEnv(
+      { project: { projectPaths }, validProjectPaths: [] },
+      async ({ pi, listeners }) => {
+        const cmd = interAgentCommand(pi);
+        await cmd.handler("connect rx", pi.ctx);
+        assert.equal(listeners.length, 0);
+        assert.ok(
+          pi.notifyLog.some((entry) =>
+            entry.message.includes(
+              "interAgent.projectPaths must be a non-empty list of non-empty strings",
+            ),
+          ),
+        );
+      },
+    );
+  }
+});
+
+test("legacy projectPath fails closed with migration guidance", async () => {
+  await withEnv(
+    {
+      project: { projectPath: "../legacy-helper" },
+      validProjectPaths: [],
+    },
+    async ({ pi, listeners }) => {
+      const cmd = interAgentCommand(pi);
+      await cmd.handler("connect rx", pi.ctx);
+      assert.equal(listeners.length, 0);
+      assert.ok(
+        pi.notifyLog.some((entry) =>
+          entry.message.includes(
+            "interAgent.projectPath is no longer supported; use interAgent.projectPaths",
+          ),
+        ),
+      );
+    },
+  );
+});
+
+test("well-formed projectPaths with no valid candidate fail closed", async () => {
+  await withEnv(
+    {
+      project: { projectPaths: ["../missing-a", "../missing-b"] },
+      validProjectPaths: [],
+    },
+    async ({ pi, listeners }) => {
+      const cmd = interAgentCommand(pi);
+      await cmd.handler("connect rx", pi.ctx);
+      assert.equal(listeners.length, 0);
+      const failure = pi.notifyLog.find((entry) =>
+        entry.message.includes("configured projectPaths candidates"),
+      );
+      assert.ok(failure);
+      assert.ok(failure.message.includes("missing-a/.venv/bin"));
+      assert.ok(failure.message.includes("missing-b/.venv/bin"));
+    },
+  );
+});
+
 test("delivery command overrides the session mode for future arrivals only", async () => {
   await withEnv(
-    { project: { projectPath: process.cwd(), deliveryMode: "queued" } },
+    { project: { projectPaths: [process.cwd()], deliveryMode: "queued" } },
     async ({ pi, listeners }) => {
       const cmd = interAgentCommand(pi);
       await cmd.handler(`connect rx`, pi.ctx);
@@ -682,7 +881,7 @@ test("delivery command overrides the session mode for future arrivals only", asy
 
 test("delivery command accepts any leading i/q string for the mode", async () => {
   await withEnv(
-    { project: { projectPath: process.cwd(), deliveryMode: "queued" } },
+    { project: { projectPaths: [process.cwd()], deliveryMode: "queued" } },
     async ({ pi }) => {
       const cmd = interAgentCommand(pi);
 
@@ -723,7 +922,7 @@ test("project settings override global settings for delivery mode precedence", a
   await withEnv(
     {
       global: { deliveryMode: "immediate" },
-      project: { projectPath: process.cwd(), deliveryMode: "queued" },
+      project: { projectPaths: [process.cwd()], deliveryMode: "queued" },
     },
     async ({ pi, listeners }) => {
       const cmd = interAgentCommand(pi);
@@ -745,7 +944,7 @@ test("project settings override global settings for delivery mode precedence", a
   await withEnv(
     {
       global: { deliveryMode: "immediate" },
-      project: { projectPath: process.cwd() },
+      project: { projectPaths: [process.cwd()] },
     },
     async ({ pi, listeners }) => {
       const cmd = interAgentCommand(pi);
@@ -776,7 +975,7 @@ test("queued user notification is metadata-only while immediate shows the bounde
   await withEnv(
     {
       global: { deliveryMode: "immediate" },
-      project: { projectPath: process.cwd() },
+      project: { projectPaths: [process.cwd()] },
     },
     async ({ pi, listeners }) => {
       const cmd = interAgentCommand(pi);
@@ -792,7 +991,7 @@ test("queued user notification is metadata-only while immediate shows the bounde
   );
 
   await withEnv(
-    { project: { projectPath: process.cwd(), deliveryMode: "queued" } },
+    { project: { projectPaths: [process.cwd()], deliveryMode: "queued" } },
     async ({ pi, listeners }) => {
       const cmd = interAgentCommand(pi);
       await cmd.handler("connect rx", pi.ctx);
@@ -810,7 +1009,7 @@ test("queued user notification is metadata-only while immediate shows the bounde
 
 test("connection transitions notify the model without triggering a turn", async () => {
   await withEnv(
-    { project: { projectPath: process.cwd(), deliveryMode: "queued" } },
+    { project: { projectPaths: [process.cwd()], deliveryMode: "queued" } },
     async ({ pi, listeners }) => {
       const cmd = interAgentCommand(pi);
       await cmd.handler("connect rx", pi.ctx);
@@ -862,7 +1061,7 @@ test("connection transitions notify the model without triggering a turn", async 
 
 test("replacing a listener emits one completed connection status", async () => {
   await withEnv(
-    { project: { projectPath: process.cwd(), deliveryMode: "queued" } },
+    { project: { projectPaths: [process.cwd()], deliveryMode: "queued" } },
     async ({ pi, listeners }) => {
       const cmd = interAgentCommand(pi);
       await cmd.handler("connect a", pi.ctx);
@@ -892,7 +1091,7 @@ test("replacing a listener emits one completed connection status", async () => {
 
 test("unexpected listener exit notifies the model of disconnection", async () => {
   await withEnv(
-    { project: { projectPath: process.cwd(), deliveryMode: "queued" } },
+    { project: { projectPaths: [process.cwd()], deliveryMode: "queued" } },
     async ({ pi, listeners }) => {
       const cmd = interAgentCommand(pi);
       await cmd.handler("connect rx", pi.ctx);
@@ -920,7 +1119,7 @@ test("unexpected listener exit notifies the model of disconnection", async () =>
 
 test("unexpected listener failure uses one status notification", async () => {
   await withEnv(
-    { project: { projectPath: process.cwd(), deliveryMode: "queued" } },
+    { project: { projectPaths: [process.cwd()], deliveryMode: "queued" } },
     async ({ pi, listeners }) => {
       const cmd = interAgentCommand(pi);
       await cmd.handler("connect rx", pi.ctx);
@@ -946,7 +1145,7 @@ test("unexpected listener failure uses one status notification", async () => {
 
 test("listener disconnect and reconnect preserve unread mailbox state", async () => {
   await withEnv(
-    { project: { projectPath: process.cwd(), deliveryMode: "queued" } },
+    { project: { projectPaths: [process.cwd()], deliveryMode: "queued" } },
     async ({ pi, listeners }) => {
       const cmd = interAgentCommand(pi);
       await cmd.handler("connect rx", pi.ctx);
@@ -981,7 +1180,7 @@ test("listener disconnect and reconnect preserve unread mailbox state", async ()
 
 test("malformed frame followed by a valid frame both handle correctly", async () => {
   await withEnv(
-    { project: { projectPath: process.cwd(), deliveryMode: "queued" } },
+    { project: { projectPaths: [process.cwd()], deliveryMode: "queued" } },
     async ({ pi, listeners }) => {
       const cmd = interAgentCommand(pi);
       await cmd.handler("connect rx", pi.ctx);
@@ -1026,7 +1225,7 @@ test("malformed frame followed by a valid frame both handle correctly", async ()
 
 test("pending settlement before shutdown never flushes", async () => {
   await withEnv(
-    { project: { projectPath: process.cwd(), deliveryMode: "queued" } },
+    { project: { projectPaths: [process.cwd()], deliveryMode: "queued" } },
     async ({ pi, listeners }) => {
       const cmd = interAgentCommand(pi);
       await cmd.handler("connect rx", pi.ctx);
@@ -1060,7 +1259,7 @@ test("pending settlement before shutdown never flushes", async () => {
 
 test("agent_settled flushes a pending queued notice at most once", async () => {
   await withEnv(
-    { project: { projectPath: process.cwd(), deliveryMode: "queued" } },
+    { project: { projectPaths: [process.cwd()], deliveryMode: "queued" } },
     async ({ pi, listeners }) => {
       const cmd = interAgentCommand(pi);
       await cmd.handler("connect rx", pi.ctx);
@@ -1136,7 +1335,7 @@ test("ordinary command-connected identity reconnects exactly once across reload 
   _setReloadCarrierForTest(carrier);
   try {
     await withEnv(
-      { project: { projectPath: process.cwd(), deliveryMode: "queued" } },
+      { project: { projectPaths: [process.cwd()], deliveryMode: "queued" } },
       async ({ pi, listeners }) => {
         const cmd = interAgentCommand(pi);
         await cmd.handler("connect rx", pi.ctx);
@@ -1241,7 +1440,7 @@ test("startup --inter-agent flag identity reconnects exactly once across reload"
   _setReloadCarrierForTest(carrier);
   try {
     await withEnv(
-      { project: { projectPath: process.cwd(), deliveryMode: "queued" } },
+      { project: { projectPaths: [process.cwd()], deliveryMode: "queued" } },
       async ({ pi, listeners }) => {
         // The flag takes precedence over transcript state; it is reapplied on every
         // session_start reason including reload.
@@ -1299,7 +1498,7 @@ test("mailbox restore itself does not start a listener or change routing identit
   _setReloadCarrierForTest(carrier);
   try {
     await withEnv(
-      { project: { projectPath: process.cwd(), deliveryMode: "queued" } },
+      { project: { projectPaths: [process.cwd()], deliveryMode: "queued" } },
       async ({ pi, listeners }) => {
         const cmd = interAgentCommand(pi);
         await cmd.handler("connect rx", pi.ctx);
@@ -1345,7 +1544,7 @@ test("reload restores exactly one body-free awareness notice for a pre-reload pe
   _setReloadCarrierForTest(carrier);
   try {
     await withEnv(
-      { project: { projectPath: process.cwd(), deliveryMode: "queued" } },
+      { project: { projectPaths: [process.cwd()], deliveryMode: "queued" } },
       async ({ pi, listeners }) => {
         const cmd = interAgentCommand(pi);
         await cmd.handler("connect rx", pi.ctx);
@@ -1394,7 +1593,7 @@ test("non-reload shutdown/start reasons clear the handoff and start empty", asyn
   _setReloadCarrierForTest(carrier);
   try {
     await withEnv(
-      { project: { projectPath: process.cwd(), deliveryMode: "queued" } },
+      { project: { projectPaths: [process.cwd()], deliveryMode: "queued" } },
       async ({ pi, listeners }) => {
         const cmd = interAgentCommand(pi);
         await cmd.handler("connect rx", pi.ctx);
@@ -1432,7 +1631,7 @@ test("reload handoff bodies never reach notices, settings entries, or diagnostic
   _setReloadCarrierForTest(carrier);
   try {
     await withEnv(
-      { project: { projectPath: process.cwd(), deliveryMode: "queued" } },
+      { project: { projectPaths: [process.cwd()], deliveryMode: "queued" } },
       async ({ pi, listeners }) => {
         const cmd = interAgentCommand(pi);
         await cmd.handler("connect rx", pi.ctx);
@@ -1478,7 +1677,7 @@ test("reload fails closed when stopListener cannot stop the old listener (hung c
   _setStopTimeoutsForTest(10, 10);
   try {
     await withEnv(
-      { project: { projectPath: process.cwd(), deliveryMode: "queued" } },
+      { project: { projectPaths: [process.cwd()], deliveryMode: "queued" } },
       async ({ pi, listeners }) => {
         const cmd = interAgentCommand(pi);
         await cmd.handler("connect rx", pi.ctx);

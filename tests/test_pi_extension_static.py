@@ -524,13 +524,24 @@ def test_pi_extension_registers_user_only_kick_command() -> None:
     assert 'name: "inter_agent_kick"' not in content
 
 
-def test_pi_extension_resolves_relative_paths_from_settings_file() -> None:
+def test_pi_extension_resolves_project_paths_from_settings_file() -> None:
     content = PI_EXTENSION.read_text(encoding="utf-8")
 
     assert "function resolveConfigPaths" in content
+    assert "function resolveProjectPaths" in content
     assert "const baseDir = dirname(settingsPath);" in content
-    assert "projectPath: resolvePathOption(config.projectPath, baseDir)" in content
-    assert "dataDir: resolvePathOption(config.dataDir, baseDir)" in content
+    assert "const normalized = resolveProjectPaths(rawProjectPaths, baseDir);" in content
+    assert "resolved.dataDir = resolvePathOption(config.dataDir, baseDir);" in content
+
+
+def test_pi_extension_uses_list_only_project_paths() -> None:
+    content = PI_EXTENSION.read_text(encoding="utf-8")
+
+    assert "projectPaths?: string[];" in content
+    assert "projectPathsExplicit?: boolean;" in content
+    assert "projectPath?: unknown;" in content
+    assert "interAgent.projectPaths must be a non-empty list of non-empty strings" in content
+    assert "interAgent.projectPath is no longer supported" in content
 
 
 def test_pi_extension_passes_configured_secret_to_helpers() -> None:
@@ -542,14 +553,15 @@ def test_pi_extension_passes_configured_secret_to_helpers() -> None:
 
 def test_pi_extension_reports_runtime_setup_guidance() -> None:
     """Missing helpers should show short setup guidance and preserve fail-fast
-    paths for explicitly configured projectPath values.
+    paths for explicitly configured projectPaths values.
     """
     content = PI_EXTENSION.read_text(encoding="utf-8")
 
     assert 'const RUNTIME_SETUP_DOCS = "README.md"' in content
     assert "const helper = process.env.INTER_AGENT_PI_HELPER;" in content
-    assert "config.projectPathExplicit && config.projectPath" in content
-    assert "missingConfiguredRuntimeMessage(binDir)" in content
+    assert "config.projectPathsExplicit" in content
+    assert "missingConfiguredProjectPathsMessage(projectPaths)" in content
+    assert "config.projectPathsError" in content
     assert "MANAGED_RUNTIME_VENV" in content
     assert "pathScripts()" in content
     assert "setupNeededMessage()" in content
