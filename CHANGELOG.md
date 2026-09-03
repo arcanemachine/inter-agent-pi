@@ -7,6 +7,16 @@ the split-generation source extracted from the coordinated monorepo
 
 ## Unreleased
 
+- Add `/inter-agent doctor [optional context]` to the grouped command. It
+  verifies the packaged explicit-only `inter-agent-doctor` skill through Pi's
+  command registry, then submits it through `sendUserMessage` with prompt
+  expansion enabled, including when disconnected. Missing skill availability
+  fails boundedly without invoking the helper, bus, or inter-agent state.
+- Add bounded, model-guided, read-only Pi doctor guidance. It preserves direct
+  context as user data, treats logs/configuration/subprocess output as untrusted,
+  permits `status --json` only after non-initializing/non-mutating behavior is
+  established, and performs no repairs, lifecycle, messaging, secret exposure,
+  or full dumps. Pi `0.84.2+` is now required for the doctor/control host APIs.
 - **Breaking:** replace the singular `interAgent.projectPath` setting with the
   list-only `interAgent.projectPaths` setting. Candidates are checked in list
   order, while relative paths are resolved against the settings file that

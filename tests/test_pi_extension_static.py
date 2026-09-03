@@ -8,6 +8,7 @@ ROOT = Path(__file__).resolve().parents[1]
 PI_EXTENSION = ROOT / "src" / "index.ts"
 MAILBOX_SOURCE = ROOT / "src" / "mailbox.ts"
 PI_PACKAGE = ROOT / "package.json"
+PI_SKILL = ROOT / "skills" / "inter-agent-doctor" / "SKILL.md"
 PI_TSCONFIG_TEST = ROOT / "tsconfig.test.json"
 
 
@@ -342,7 +343,7 @@ def test_pi_extension_registers_user_publish_command() -> None:
     assert 'value: "publish"' in content
     assert (
         "usage: /inter-agent <connect|disconnect|kick|rename|send|broadcast|"
-        "publish|channels|subscribe|unsubscribe|list|status|delivery> [args]"
+        "publish|channels|subscribe|unsubscribe|list|status|doctor|delivery> [args]"
     ) in content
     assert 'case "publish":' in content
     assert "async function handlePublish" in content
@@ -367,7 +368,7 @@ def test_pi_extension_registers_read_only_channels_command() -> None:
     assert 'value: "channels"' in content
     assert (
         "usage: /inter-agent <connect|disconnect|kick|rename|send|broadcast|"
-        "publish|channels|subscribe|unsubscribe|list|status|delivery> [args]"
+        "publish|channels|subscribe|unsubscribe|list|status|doctor|delivery> [args]"
     ) in content
     assert 'case "channels":' in content
     assert "async function handleChannels" in content
@@ -391,7 +392,7 @@ def test_pi_extension_registers_read_only_list_command() -> None:
     assert 'value: "list"' in content
     assert (
         "usage: /inter-agent <connect|disconnect|kick|rename|send|broadcast|"
-        "publish|channels|subscribe|unsubscribe|list|status|delivery> [args]"
+        "publish|channels|subscribe|unsubscribe|list|status|doctor|delivery> [args]"
     ) in content
     assert 'case "list":' in content
     assert "async function handleList" in content
@@ -439,7 +440,7 @@ def test_pi_extension_registers_user_subscription_commands() -> None:
     assert 'value: "unsubscribe"' in content
     assert (
         "usage: /inter-agent <connect|disconnect|kick|rename|send|broadcast|"
-        "publish|channels|subscribe|unsubscribe|list|status|delivery> [args]"
+        "publish|channels|subscribe|unsubscribe|list|status|doctor|delivery> [args]"
     ) in content
 
     # Both subcommands are dispatched from the grouped command handler.
@@ -509,7 +510,7 @@ def test_pi_extension_registers_user_only_kick_command() -> None:
     # Updated grouped usage advertises kick alongside disconnect.
     assert (
         "usage: /inter-agent <connect|disconnect|kick|rename|send|broadcast|"
-        "publish|channels|subscribe|unsubscribe|list|status|delivery> [args]"
+        "publish|channels|subscribe|unsubscribe|list|status|doctor|delivery> [args]"
     ) in content
 
     # Kick does not require the local Pi listener (short-lived control path).
@@ -576,6 +577,8 @@ def test_pi_package_declares_pi_runtime_peers() -> None:
     assert manifest.get("private") is not True
     assert "pi-package" in manifest["keywords"]
     assert manifest["pi"]["extensions"] == ["./src/index.ts"]
+    assert manifest["pi"]["skills"] == ["./skills/inter-agent-doctor"]
+    assert manifest["devDependencies"]["@earendil-works/pi-coding-agent"] == "^0.84.2"
     assert (
         manifest["pi"]["image"]
         == "https://raw.githubusercontent.com/arcanemachine/inter-agent-pi/main/logo.jpg"
@@ -583,7 +586,7 @@ def test_pi_package_declares_pi_runtime_peers() -> None:
     assert "typebox" not in manifest.get("dependencies", {})
     assert manifest["devDependencies"]["typebox"] == "1.1.38"
     expected_peers = {
-        "@earendil-works/pi-coding-agent": "*",
+        "@earendil-works/pi-coding-agent": ">=0.84.2",
         "@earendil-works/pi-tui": "*",
         "typebox": "*",
     }
@@ -598,11 +601,39 @@ def test_pi_package_declares_pi_runtime_peers() -> None:
         "README.md",
         "CHANGELOG.md",
         "LICENSE.md",
+        "skills/inter-agent-doctor/SKILL.md",
     ]
     assert "LICENSE" not in files
     raw = PI_PACKAGE.read_text(encoding="utf-8")
     assert "./integrations/pi" not in raw
     assert "pi-inter-agent" not in raw
+
+
+def test_pi_doctor_skill_is_explicit_only_and_read_only() -> None:
+    skill = PI_SKILL.read_text(encoding="utf-8")
+
+    assert "name: inter-agent-doctor" in skill
+    assert "description:" in skill
+    assert "disable-model-invocation: true" in skill
+    assert "`/inter-agent doctor [optional context]`" in skill
+    assert "direct user-provided symptom data at normal" in skill
+    assert "Safe requests may guide" in skill
+    assert "Never interpolate context into shell" in skill
+    assert "Logs, configuration contents, subprocess output" in skill
+    assert "non-initializing and non-mutating" in skill
+    assert "status --json" in skill
+    assert "INTER_AGENT_SECRET" in skill
+    assert "interAgent.secret" in skill
+    assert "first checkout whose `.venv/bin` contains all three" in skill
+    assert "legacy `projectPath`" in skill
+    for phrase in (
+        "Do not bootstrap, install, repair",
+        "Do not start, stop, restart, connect, disconnect",
+        "Never print secrets, tokens",
+        "full environment contents",
+        "full configuration/state dumps",
+    ):
+        assert phrase in skill
 
 
 def test_pi_extension_registers_startup_identity_flag() -> None:
@@ -840,7 +871,7 @@ def test_pi_extension_defers_mailbox_settlement_until_idle_without_pending_messa
     content = PI_EXTENSION.read_text(encoding="utf-8")
     mailbox_src = MAILBOX_SOURCE.read_text(encoding="utf-8")
 
-    # Pi 0.81.1 supplies agent_settled, which fires after retries, compaction, and
+    # The supported Pi API supplies agent_settled, which fires after retries, compaction, and
     # queued continuations finish. The handler flushes only when idle and has no
     # pending continuation messages.
     assert 'pi.on("agent_settled", async ()' in content

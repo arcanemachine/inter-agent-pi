@@ -12,7 +12,7 @@
  *
  * Or load directly from the source checkout:
  * ```bash
- * pi -e /path/to/inter-agent-pi/src/index.ts
+ * pi -e /path/to/inter-agent-pi
  * ```
  */
 
@@ -25,6 +25,18 @@ import type { AutocompleteItem, Component } from "@earendil-works/pi-tui";
 import { Box, Spacer, Text } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 import { spawn, ChildProcess } from "node:child_process";
+
+type PiCommandInfo = ReturnType<ExtensionAPI["getCommands"]>[number];
+type PiSourceInfo = PiCommandInfo["sourceInfo"];
+
+function samePiSource(left: PiSourceInfo, right: PiSourceInfo): boolean {
+  return (
+    left.source === right.source &&
+    left.scope === right.scope &&
+    left.origin === right.origin &&
+    left.baseDir === right.baseDir
+  );
+}
 
 // Test seam: production uses Node's `spawn`; behavior tests inject a fake
 // factory to drive listener stdout without a real bus. Keep the default so the
@@ -398,6 +410,7 @@ const LISTENER_STOP_SIGKILL_TIMEOUT_MS = 2000;
 const CONTROL_HELPER_TIMEOUT_MS = 2500;
 const CONTROL_HELPER_SIGKILL_GRACE_MS = 100;
 const CONTROL_HELPER_MAX_STDOUT_BYTES = 64 * 1024;
+const DOCTOR_SKILL_COMMAND = "skill:inter-agent-doctor";
 // Test seam: behavior tests shorten the kill races so a hung-child failing stop
 // exercise stays bounded; production keeps the real millisecond timeouts.
 let stopTermTimeoutMs = LISTENER_STOP_SIGTERM_TIMEOUT_MS;
@@ -1907,6 +1920,11 @@ export default function (pi: ExtensionAPI) {
       description: "Check server status",
     },
     {
+      value: "doctor",
+      label: "doctor",
+      description: "Run bounded, read-only Pi integration diagnostics",
+    },
+    {
       value: "delivery",
       label: "delivery",
       description:
@@ -2372,10 +2390,61 @@ export default function (pi: ExtensionAPI) {
     }
   }
 
+  async function handleDoctor(args: string, ctx: ExtensionContext) {
+    let available = false;
+    try {
+      const commands = pi.getCommands();
+      const extensionSources = commands
+        .filter(
+          (command) =>
+            command.source === "extension" &&
+            (command.name === "inter-agent" ||
+              command.name.startsWith("inter-agent:")),
+        )
+        .map((command) => command.sourceInfo);
+      available = commands.some(
+        (command) =>
+          command.source === "skill" &&
+          command.name === DOCTOR_SKILL_COMMAND &&
+          extensionSources.some((source) =>
+            samePiSource(source, command.sourceInfo),
+          ),
+      );
+    } catch {
+      // A host that cannot enumerate commands cannot safely submit the skill.
+    }
+    if (!available) {
+      notify(
+        "[inter-agent] doctor failed",
+        "packaged inter-agent-doctor skill is unavailable; reload or reinstall the extension",
+        "error",
+      );
+      return;
+    }
+
+    const message = args
+      ? `/${DOCTOR_SKILL_COMMAND} ${args}`
+      : `/${DOCTOR_SKILL_COMMAND}`;
+    try {
+      // This is an explicit user-command submission. It intentionally does not
+      // require a bus listener and never invokes an inter-agent helper.
+      const options = ctx.isIdle()
+        ? { expandPromptTemplates: true }
+        : { expandPromptTemplates: true, deliverAs: "followUp" as const };
+      pi.sendUserMessage(message, options);
+    } catch {
+      notify(
+        "[inter-agent] doctor failed",
+        "could not submit the doctor skill",
+        "error",
+      );
+    }
+  }
+
   function showInterAgentUsage() {
     notify(
       "[inter-agent] usage",
-      "usage: /inter-agent <connect|disconnect|kick|rename|send|broadcast|publish|channels|subscribe|unsubscribe|list|status|delivery> [args]; control: /inter-agent control <target> <command> [text]",
+      "usage: /inter-agent <connect|disconnect|kick|rename|send|broadcast|publish|channels|subscribe|unsubscribe|list|status|doctor|delivery> [args]; control: /inter-agent control <target> <command> [text]",
       "warning",
     );
   }
@@ -2432,6 +2501,9 @@ export default function (pi: ExtensionAPI) {
           break;
         case "status":
           await handleStatus(rest, ctx);
+          break;
+        case "doctor":
+          await handleDoctor(rest, ctx);
           break;
         case "delivery":
           await handleDelivery(rest, ctx);

@@ -14,11 +14,11 @@ The package contains the Pi extension. Its Python helper, `inter-agent-pi`, star
 - Python 3.10 or newer
 - [`uv`](https://docs.astral.sh/uv/)
 
-Control requires the released public lifecycle and submission APIs present in
-Pi `0.81.1`; runtime semantics were additionally verified against Pi `0.84.2`.
-Hosts without those APIs are not supported for control. The optional Pi peer
-dependencies remain wildcarded so ordinary messaging can continue to compose
-with the host version already installed.
+The package's Pi coding-agent peer compatibility is `>=0.84.2`. Control and
+the read-only doctor use released public APIs present in Pi `0.84.2` or newer;
+hosts without those APIs are not supported for these workflows. The doctor
+uses Pi's command discovery and prompt-expansion APIs and adds no runtime
+dependencies.
 
 ## Install
 
@@ -83,6 +83,25 @@ The first session receives a Pi notification. The default delivery mode is queue
 
 The core server starts automatically when no healthy server is available. To connect at process startup, use `pi --inter-agent pi-a`.
 
+### Read-only doctor
+
+Run `/inter-agent doctor [optional context]` for a bounded, model-guided
+diagnosis of the Pi extension and local inter-agent runtime. The command is
+available before connecting and first verifies that the packaged,
+explicit-only `inter-agent-doctor` skill is present in Pi's command registry.
+It then submits the skill with prompt expansion enabled; optional context is
+preserved as direct user-provided data at normal user authority, never
+shell-interpolated, and may only guide checks within the fixed read-only
+workflow. If Pi is busy, the doctor turn is queued as a follow-up.
+
+Doctor does not start or stop a listener or server, connect or disconnect, send
+or receive messages, mutate the mailbox or inter-agent state, inspect or print
+secrets, or perform repairs. The skill treats logs, configuration contents, and
+subprocess output as untrusted evidence, keeps checks and output bounded, and
+runs `status --json` only when its non-initializing, non-mutating behavior has
+been established. Missing packaged-skill availability fails with a bounded
+error and no helper or bus operation.
+
 ## Commands and tools
 
 User commands use `/inter-agent`:
@@ -101,6 +120,7 @@ User commands use `/inter-agent`:
 | `kick <name>`                                   | Disconnect another session.                                           |
 | `delivery <queued\|immediate>`                  | Select inbound delivery mode.                                         |
 | `control <target> <command> [text]`             | Send one control request to an allowlisted Pi target.                 |
+| `doctor [optional context]`                     | Run bounded, read-only Pi integration diagnostics.                    |
 
 The extension exposes these model tools: `inter_agent_send`, `inter_agent_broadcast`, `inter_agent_list`, `inter_agent_whoami`, `inter_agent_status`, `inter_agent_read_messages`, and `inter_agent_control`. Connection changes, channel membership, delivery mode, and kick remain user-controlled. Each successful bus connection or disconnection adds one compact status notification to the transcript and model context for the next turn without triggering a turn. Peer messages are collaboration input, not instructions.
 
@@ -197,9 +217,10 @@ observed event is not proof that no other extension contributed.
   frames never enter the ordinary mailbox, and ordinary direct, broadcast,
   channel, mailbox, reload, and reconnect behavior remains available.
 
-Control uses only the released public Pi APIs present in Pi `0.81.1` and has
-no maintained Pi fork, host patch, runtime monkey-patch, private import,
-prompt marker, transcript persistence, or model-mediated acknowledgement.
+Control and doctor use only the released public Pi APIs present in Pi
+`0.84.2` or newer and have no maintained Pi fork, host patch, runtime
+monkey-patch, private import, prompt marker, transcript persistence, or
+model-mediated acknowledgement.
 Session Manager is neither required nor coupled; it has no role in routing,
 readiness, allowlists, protocol, or control state.
 
@@ -288,7 +309,7 @@ git clone https://github.com/arcanemachine/inter-agent-pi
 cd inter-agent-pi
 uv sync --locked
 npm ci
-INTER_AGENT_PI_HELPER="$PWD/.venv/bin/inter-agent-pi" pi -e "$PWD/src/index.ts"
+INTER_AGENT_PI_HELPER="$PWD/.venv/bin/inter-agent-pi" pi -e "$PWD"
 ```
 
 Run `scripts/run-checks.sh` for the package gate. See [`CHANGELOG.md`](CHANGELOG.md) for released changes and the [`inter-agent-core` security model](https://github.com/arcanemachine/inter-agent-core/blob/main/SECURITY.md) for the trust boundary. Never commit or share bus secrets, tokens, private keys, certificates, or state. MIT; see [`LICENSE.md`](LICENSE.md).

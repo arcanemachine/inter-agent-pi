@@ -27,6 +27,11 @@ EXPECTED_PI_PEERS = {
     "@earendil-works/pi-tui",
     "typebox",
 }
+EXPECTED_PI_PEER_RANGES = {
+    "@earendil-works/pi-coding-agent": ">=0.84.2",
+    "@earendil-works/pi-tui": "*",
+    "typebox": "*",
+}
 
 NPM_ALLOWED_FILES = {
     "package/package.json",
@@ -36,6 +41,7 @@ NPM_ALLOWED_FILES = {
     "package/README.md",
     "package/CHANGELOG.md",
     "package/LICENSE.md",
+    "package/skills/inter-agent-doctor/SKILL.md",
 }
 
 # Content that must never ship in either artifact.
@@ -88,8 +94,8 @@ def validate_npm(tgz: Path) -> None:
     peers = manifest.get("peerDependencies", {})
     if not isinstance(peers, dict):
         fail("npm peerDependencies must be an object")
-    if set(peers) != EXPECTED_PI_PEERS or any(value != "*" for value in peers.values()):
-        fail(f"npm peerDependencies={peers!r}; expected Pi peers at '*'")
+    if peers != EXPECTED_PI_PEER_RANGES:
+        fail(f"npm peerDependencies={peers!r}; expected {EXPECTED_PI_PEER_RANGES!r}")
     peer_meta = manifest.get("peerDependenciesMeta", {})
     if not isinstance(peer_meta, dict):
         fail("npm peerDependenciesMeta must be an object")
@@ -100,7 +106,15 @@ def validate_npm(tgz: Path) -> None:
     if manifest.get("pi", {}).get("image") != EXPECTED_PI_IMAGE:  # type: ignore[union-attr]
         fail(f"npm pi.image={manifest.get('pi', {}).get('image')!r}")  # type: ignore[union-attr]
     files = set(manifest.get("files", []))  # type: ignore[union-attr]
-    if files != {"src/index.ts", "src/control.ts", "src/mailbox.ts", "README.md", "CHANGELOG.md", "LICENSE.md"}:
+    if files != {
+        "src/index.ts",
+        "src/control.ts",
+        "src/mailbox.ts",
+        "README.md",
+        "CHANGELOG.md",
+        "LICENSE.md",
+        "skills/inter-agent-doctor/SKILL.md",
+    }:
         fail(f"npm files allowlist={sorted(files)!r}")
 
     shipped = set(names)
