@@ -29,7 +29,7 @@ Run Pi adapter commands through the installed package entry point:
 - `uv run inter-agent-pi status [--json]`
 - `uv run inter-agent-pi shutdown`
 
-The Pi extension auto-starts the server when `/inter-agent-connect` runs and no healthy server is available. Auto-started servers use an explicit 300-second idle timeout and shut down after that period with no connected sessions. Manual server starts remain supported with `uv run inter-agent-server` and run until explicit shutdown unless you pass `--idle-timeout <seconds>`.
+The Pi extension auto-starts the server when `/inter-agent connect` runs and no healthy server is available. Auto-started servers use an explicit 300-second idle timeout and shut down after that period with no connected sessions. Manual server starts remain supported with `uv run inter-agent-server` and run until explicit shutdown unless you pass `--idle-timeout <seconds>`.
 
 Use `send` for normal replies and targeted coordination. Use `broadcast` only when the user explicitly asks to message everyone or the information is genuinely for every connected session. Host integrations that send through the short-lived CLI should pass their connected routing name with `--from <name>` so receivers see the real sender instead of the control connection.
 
