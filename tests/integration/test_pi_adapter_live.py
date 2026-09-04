@@ -722,5 +722,12 @@ async def test_pi_extension_list_command_rejects_malformed_helper_response(
     )
     notifications = json.loads(result.stdout)
     assert notifications == [
-        {"body": "[inter-agent] list failed: invalid response", "type": "error"}
+        {
+            "body": (
+                "[inter-agent] list failed: invalid response. Run /inter-agent doctor "
+                "for bounded diagnostics and check the Pi extension README.md for "
+                "setup guidance."
+            ),
+            "type": "error",
+        }
     ]

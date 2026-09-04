@@ -449,8 +449,11 @@ interface ScriptResult {
   code: number | null;
 }
 
+type FailureNotifier = (title: string, body: string) => void;
+
 interface ListenerOptions {
   notifyOnReady?: boolean;
+  failureNotifier?: FailureNotifier;
 }
 
 let listenerProc: ChildProcess | null = null;
@@ -551,6 +554,26 @@ function notify(
 ) {
   currentCtx?.ui.notify(truncate(`${title}: ${body}`, NOTIFY_MAX_LEN), type);
 }
+
+const PI_DOCTOR_FAILURE_HINT =
+  "Run /inter-agent doctor for bounded diagnostics and check the Pi extension README.md for setup guidance.";
+
+function notifyCommandFailure(title: string, body: string): void {
+  const separator = /[.!?]$/.test(body) ? "" : ".";
+  const suffix = `${separator} ${PI_DOCTOR_FAILURE_HINT}`;
+  const maxBodyLength = Math.max(
+    0,
+    NOTIFY_MAX_LEN - title.length - 2 - suffix.length,
+  );
+  const boundedBody =
+    body.length <= maxBodyLength
+      ? body
+      : `${body.slice(0, Math.max(0, maxBodyLength - 2))} …`;
+  notify(title, `${boundedBody}${suffix}`, "error");
+}
+
+const notifyDefaultFailure: FailureNotifier = (title, body) =>
+  notify(title, body, "error");
 
 function sendConnectionStatus(
   pi: ExtensionAPI,
@@ -837,10 +860,11 @@ async function waitForServerAvailable(
 
 async function ensureServerAvailable(
   scripts: InterAgentScripts,
+  failureNotifier: FailureNotifier = notifyDefaultFailure,
 ): Promise<boolean> {
   const initial = await readServerStatus(scripts);
   if (initial.ok === false) {
-    notify("[inter-agent] connect failed", initial.message, "error");
+    failureNotifier("[inter-agent] connect failed", initial.message);
     return false;
   }
 
@@ -849,23 +873,22 @@ async function ensureServerAvailable(
   }
 
   if (!shouldAutoStartServer(initial.payload)) {
-    notify(
+    failureNotifier(
       "[inter-agent] connect failed",
       statusFailureGuidance(initial.payload),
-      "error",
     );
     return false;
   }
 
   const started = await startServerProcess(scripts);
   if (started.ok === false) {
-    notify("[inter-agent] connect failed", started.message, "error");
+    failureNotifier("[inter-agent] connect failed", started.message);
     return false;
   }
 
   const ready = await waitForServerAvailable(scripts);
   if (ready.ok === false) {
-    notify("[inter-agent] connect failed", ready.message, "error");
+    failureNotifier("[inter-agent] connect failed", ready.message);
     return false;
   }
 
@@ -977,18 +1000,18 @@ async function startListener(
   options: ListenerOptions = {},
 ): Promise<boolean> {
   const wasConnected = listenerReady && currentConnection !== null;
+  const reportFailure = options.failureNotifier ?? notifyDefaultFailure;
   const stopped = await stopListener(pi, ctx, { expected: true });
   if (!stopped) {
-    notify(
+    reportFailure(
       "[inter-agent] listener error",
       "previous listener did not terminate; cannot start a new listener",
-      "error",
     );
     return false;
   }
   const scripts = getScripts(config);
   if (scripts.unavailableMessage) {
-    notify("[inter-agent] listener error", scripts.unavailableMessage, "error");
+    reportFailure("[inter-agent] listener error", scripts.unavailableMessage);
     return false;
   }
   const args = ["connect", name];
@@ -1044,10 +1067,9 @@ async function startListener(
         if (msg.op === "error") {
           const code = String(msg.code || "unknown");
           const text = String(msg.message || "connection rejected");
-          notify(
+          reportFailure(
             `[inter-agent] connect failed`,
             formatConnectError(code, text),
-            "error",
           );
           listenerReady = false;
           currentConnection = null;
@@ -1183,13 +1205,12 @@ async function startListener(
 
     const nodeErr = err as NodeJS.ErrnoException;
     if (nodeErr.code === "ENOENT") {
-      notify(
+      reportFailure(
         "[inter-agent] listener error",
         "inter-agent connect command was not found. Check that inter-agent is installed and configured, then try again.",
-        "error",
       );
     } else {
-      notify("[inter-agent] listener error", String(err), "error");
+      reportFailure("[inter-agent] listener error", String(err));
     }
   });
 
@@ -1944,7 +1965,10 @@ export default function (pi: ExtensionAPI) {
       return;
     }
 
-    const ready = await ensureServerAvailable(currentScripts());
+    const ready = await ensureServerAvailable(
+      currentScripts(),
+      notifyCommandFailure,
+    );
     if (!ready) return;
 
     const started = await startListener(
@@ -1955,6 +1979,7 @@ export default function (pi: ExtensionAPI) {
       parsed.label,
       {
         notifyOnReady: true,
+        failureNotifier: notifyCommandFailure,
       },
     );
     if (!started) return;
@@ -1972,10 +1997,9 @@ export default function (pi: ExtensionAPI) {
         sendConnectionStatus(pi, "disconnected", DISCONNECTED_MESSAGE);
       }
     } else {
-      notify(
+      notifyCommandFailure(
         "[inter-agent] disconnect failed",
         "listener did not terminate",
-        "error",
       );
     }
   }
@@ -1995,17 +2019,16 @@ export default function (pi: ExtensionAPI) {
     // connection; it does not require this Pi listener to be connected.
     const result = await execPiScript(currentScripts(), ["kick", name]);
     if (result.code !== 0) {
-      notify(
+      notifyCommandFailure(
         "[inter-agent] kick failed",
         scriptFailureMessage(result, "kick"),
-        "error",
       );
       return;
     }
     try {
       const payload = JSON.parse(result.stdout);
       if (payload.op !== "kick_ok") {
-        notify("[inter-agent] kick failed", "invalid response", "error");
+        notifyCommandFailure("[inter-agent] kick failed", "invalid response");
         return;
       }
       notify(
@@ -2013,27 +2036,29 @@ export default function (pi: ExtensionAPI) {
         `removed ${payload.name} (session ${payload.session_id})`,
       );
     } catch {
-      notify("[inter-agent] kick failed", "invalid response", "error");
+      notifyCommandFailure("[inter-agent] kick failed", "invalid response");
     }
   }
 
   async function handleRename(args: string, ctx: ExtensionContext) {
-    if (!listenerReady || !currentConnection) {
-      notify(
-        "[inter-agent] rename failed",
-        "Not connected to the inter-agent bus. Use /inter-agent connect first.",
-        "error",
-      );
-      return;
-    }
     const parsed = parseRenameArgs(args);
     if (parsed.ok === false) {
       notify("[inter-agent] rename failed", parsed.message, "error");
       return;
     }
+    if (!listenerReady || !currentConnection) {
+      notifyCommandFailure(
+        "[inter-agent] rename failed",
+        "Not connected to the inter-agent bus. Use /inter-agent connect first.",
+      );
+      return;
+    }
 
     const label = parsed.label ?? currentConnection.label;
-    const ready = await ensureServerAvailable(currentScripts());
+    const ready = await ensureServerAvailable(
+      currentScripts(),
+      notifyCommandFailure,
+    );
     if (!ready) return;
 
     // Rename replaces the listener identity; fail active control work with
@@ -2042,12 +2067,12 @@ export default function (pi: ExtensionAPI) {
     controlEngine?.onExplicitDisconnect();
     const started = await startListener(pi, ctx, config, parsed.name, label, {
       notifyOnReady: true,
+      failureNotifier: notifyCommandFailure,
     });
     if (!started) {
-      notify(
+      notifyCommandFailure(
         "[inter-agent] rename failed",
         "previous listener did not terminate",
-        "error",
       );
       return;
     }
@@ -2065,10 +2090,9 @@ export default function (pi: ExtensionAPI) {
     }
     const [, to, text] = match;
     if (!listenerReady || !currentConnection) {
-      notify(
+      notifyCommandFailure(
         "[inter-agent] send failed",
         "Not connected to the inter-agent bus. Use /inter-agent connect first.",
-        "error",
       );
       return;
     }
@@ -2081,10 +2105,9 @@ export default function (pi: ExtensionAPI) {
       name,
     ]);
     if (result.code !== 0) {
-      notify(
+      notifyCommandFailure(
         "[inter-agent] send failed",
         scriptFailureMessage(result, "send"),
-        "error",
       );
       return;
     }
@@ -2099,10 +2122,9 @@ export default function (pi: ExtensionAPI) {
       return;
     }
     if (!listenerReady || !currentConnection) {
-      notify(
+      notifyCommandFailure(
         "[inter-agent] broadcast failed",
         "Not connected to the inter-agent bus. Use /inter-agent connect first.",
-        "error",
       );
       return;
     }
@@ -2114,10 +2136,9 @@ export default function (pi: ExtensionAPI) {
       name,
     ]);
     if (result.code !== 0) {
-      notify(
+      notifyCommandFailure(
         "[inter-agent] broadcast failed",
         scriptFailureMessage(result, "broadcast"),
-        "error",
       );
       return;
     }
@@ -2137,10 +2158,9 @@ export default function (pi: ExtensionAPI) {
     }
     const [, channel, text] = match;
     if (!listenerReady || !currentConnection) {
-      notify(
+      notifyCommandFailure(
         "[inter-agent] publish failed",
         "Not connected to the inter-agent bus. Use /inter-agent connect first.",
-        "error",
       );
       return;
     }
@@ -2153,10 +2173,9 @@ export default function (pi: ExtensionAPI) {
       name,
     ]);
     if (result.code !== 0) {
-      notify(
+      notifyCommandFailure(
         "[inter-agent] publish failed",
         scriptFailureMessage(result, "publish"),
-        "error",
       );
       return;
     }
@@ -2175,10 +2194,9 @@ export default function (pi: ExtensionAPI) {
     }
     const result = await execPiScript(currentScripts(), ["channels", "--json"]);
     if (result.code !== 0) {
-      notify(
+      notifyCommandFailure(
         "[inter-agent] channels failed",
         scriptFailureMessage(result, "channels"),
-        "error",
       );
       return;
     }
@@ -2214,7 +2232,7 @@ export default function (pi: ExtensionAPI) {
         lines.join("; ") || "no channels currently have subscribers",
       );
     } catch {
-      notify("[inter-agent] channels failed", "invalid response", "error");
+      notifyCommandFailure("[inter-agent] channels failed", "invalid response");
     }
   }
 
@@ -2230,10 +2248,9 @@ export default function (pi: ExtensionAPI) {
       return;
     }
     if (!listenerReady || !currentConnection) {
-      notify(
+      notifyCommandFailure(
         "[inter-agent] subscribe failed",
         "Not connected to the inter-agent bus. Use /inter-agent connect first.",
-        "error",
       );
       return;
     }
@@ -2245,10 +2262,9 @@ export default function (pi: ExtensionAPI) {
       name,
     ]);
     if (result.code !== 0) {
-      notify(
+      notifyCommandFailure(
         "[inter-agent] subscribe failed",
         scriptFailureMessage(result, "subscribe"),
-        "error",
       );
       return;
     }
@@ -2267,10 +2283,9 @@ export default function (pi: ExtensionAPI) {
       return;
     }
     if (!listenerReady || !currentConnection) {
-      notify(
+      notifyCommandFailure(
         "[inter-agent] unsubscribe failed",
         "Not connected to the inter-agent bus. Use /inter-agent connect first.",
-        "error",
       );
       return;
     }
@@ -2282,10 +2297,9 @@ export default function (pi: ExtensionAPI) {
       name,
     ]);
     if (result.code !== 0) {
-      notify(
+      notifyCommandFailure(
         "[inter-agent] unsubscribe failed",
         scriptFailureMessage(result, "unsubscribe"),
-        "error",
       );
       return;
     }
@@ -2306,14 +2320,16 @@ export default function (pi: ExtensionAPI) {
     const text = textParts.length > 0 ? textParts.join(" ") : undefined;
     const result = await controlController?.execute(target, command, text);
     if (!result) {
-      notify("[inter-agent] control failed", "controller unavailable", "error");
+      notifyCommandFailure(
+        "[inter-agent] control failed",
+        "controller unavailable",
+      );
       return;
     }
     if (result.details.error) {
-      notify(
+      notifyCommandFailure(
         "[inter-agent] control failed",
         String(result.details.error),
-        "error",
       );
       return;
     }
@@ -2344,10 +2360,9 @@ export default function (pi: ExtensionAPI) {
   async function handleList(_args: string, _ctx: ExtensionContext) {
     const result = await execPiScript(currentScripts(), ["list", "--json"]);
     if (result.code !== 0) {
-      notify(
+      notifyCommandFailure(
         "[inter-agent] list failed",
         scriptFailureMessage(result, "list"),
-        "error",
       );
       return;
     }
@@ -2362,17 +2377,16 @@ export default function (pi: ExtensionAPI) {
         notify("[inter-agent] list", lines.join(", "));
       }
     } catch {
-      notify("[inter-agent] list failed", "invalid response", "error");
+      notifyCommandFailure("[inter-agent] list failed", "invalid response");
     }
   }
 
   async function handleStatus(_args: string, _ctx: ExtensionContext) {
     const result = await execPiScript(currentScripts(), ["status", "--json"]);
     if (result.code !== 0) {
-      notify(
+      notifyCommandFailure(
         "[inter-agent] status failed",
         scriptFailureMessage(result, "status"),
-        "error",
       );
       return;
     }
@@ -2386,7 +2400,7 @@ export default function (pi: ExtensionAPI) {
         state === "available" ? "info" : "warning",
       );
     } catch {
-      notify("[inter-agent] status failed", "invalid response", "error");
+      notifyCommandFailure("[inter-agent] status failed", "invalid response");
     }
   }
 
@@ -2416,7 +2430,7 @@ export default function (pi: ExtensionAPI) {
     if (!available) {
       notify(
         "[inter-agent] doctor failed",
-        "packaged inter-agent-doctor skill is unavailable; reload or reinstall the extension",
+        "packaged inter-agent-doctor skill is unavailable; reload or reinstall the extension, then check the Pi extension README.md for package-loading guidance",
         "error",
       );
       return;
@@ -2435,7 +2449,7 @@ export default function (pi: ExtensionAPI) {
     } catch {
       notify(
         "[inter-agent] doctor failed",
-        "could not submit the doctor skill",
+        "could not submit the doctor skill; check the Pi extension README.md for package-loading guidance",
         "error",
       );
     }

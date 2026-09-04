@@ -48,15 +48,18 @@ Installation and bus connectivity are separate: the commands above install
 local package files, but do not start a server or connect a Pi session. The
 first `/inter-agent connect` starts a healthy local Core server when needed.
 
-Before opening Pi, verify the helper and inspect its current server state:
+After installing and opening Pi, use `/inter-agent doctor [optional context]`
+as the primary setup and troubleshooting path, especially after a valid
+inter-agent command fails. It performs bounded, read-only diagnostics and never
+auto-repairs or invokes a repair. If the doctor command itself is unavailable,
+check this README's package-loading guidance.
 
-```bash
-"$HOME/.pi/agent/inter-agent/venv/bin/inter-agent-pi" status --json
-```
-
-A state of `"unavailable"` is expected before a server is running. After a
-successful connection, the same check should report `"available"`. You can
-install the package from Git instead for source development:
+Do not use the standalone `inter-agent-pi status --json` command as a read-only
+substitute for doctor: Core's fallback secret resolution can create or chmod the
+state directory and token file when no explicit secret is configured. The doctor
+skips that status check unless its non-initializing, non-mutating behavior has
+been established. You can install the package from Git instead for source
+development:
 
 ```bash
 pi install https://github.com/arcanemachine/inter-agent-pi
@@ -83,7 +86,7 @@ The first session receives a Pi notification. The default delivery mode is queue
 
 The core server starts automatically when no healthy server is available. To connect at process startup, use `pi --inter-agent pi-a`.
 
-### Read-only doctor
+### Read-only doctor (primary setup and recovery path)
 
 Run `/inter-agent doctor [optional context]` for a bounded, model-guided
 diagnosis of the Pi extension and local inter-agent runtime. The command is
@@ -99,8 +102,19 @@ or receive messages, mutate the mailbox or inter-agent state, inspect or print
 secrets, or perform repairs. The skill treats logs, configuration contents, and
 subprocess output as untrusted evidence, keeps checks and output bounded, and
 runs `status --json` only when its non-initializing, non-mutating behavior has
-been established. Missing packaged-skill availability fails with a bounded
+been established. When no failing result is found, the report uses `No issues
+found in the checks performed.` and `None identified.` rather than inventing a
+failure or repair step. It uses `No action needed.` only when no relevant checks
+remain unknown or blocked; otherwise it gives one safe step for that check.
+Missing packaged-skill availability fails with a bounded
 error and no helper or bus operation.
+
+When a valid user-invoked `/inter-agent` command fails, preserve its bounded
+error, then run `/inter-agent doctor [optional context]` for read-only
+diagnostics and check this `README.md` for setup guidance. The suggestion is
+text-only; doctor is never invoked automatically. If doctor itself fails,
+check the package-loading guidance in this README instead of retrying doctor
+recursively.
 
 ## Commands and tools
 
@@ -242,10 +256,12 @@ Supported keys include `host`, `port`, `dataDir`, `secret`, `tls`, `tlsCert`,
 `tlsKey`, `projectPaths`, `deliveryMode`, and `mailboxNoticeDebounceMs`.
 
 `projectPaths` is always a non-empty list of non-empty checkout-path strings.
-Each candidate is
-resolved relative to the settings file that contains the list, and `~` expands
-to the home directory. A shared settings file can therefore name both host and
-container checkouts:
+Each candidate is resolved relative to the settings file that contains the list,
+and `~` expands to the home directory. For global settings, prefer explicit
+absolute paths when you want checkout selection independent of settings-file
+location; relative paths remain supported and are anchored to the settings file,
+not the current working directory. A shared settings file can therefore name
+both host and container checkouts:
 
 ```json
 {

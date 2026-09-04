@@ -12,6 +12,11 @@ the split-generation source extracted from the coordinated monorepo
   command registry, then submits it through `sendUserMessage` with prompt
   expansion enabled, including when disconnected. Missing skill availability
   fails boundedly without invoking the helper, bus, or inter-agent state.
+- Add text-only recovery guidance after operational inter-agent command
+  failures: run `/inter-agent doctor [optional context]` and check `README.md`;
+  doctor failures do not suggest recursive doctor invocation.
+- Require healthy Pi doctor runs to say explicitly that no issues were found
+  in the checks performed instead of inventing a failure or repair step.
 - Add bounded, model-guided, read-only Pi doctor guidance. It preserves direct
   context as user data, treats logs/configuration/subprocess output as untrusted,
   permits `status --json` only after non-initializing/non-mutating behavior is

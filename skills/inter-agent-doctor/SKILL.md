@@ -110,5 +110,11 @@ One safe concrete step, separating diagnosis from any approval-requiring setup o
 Checks not performed and why.
 ```
 
-A passing local check does not prove security, trustworthiness, or end-to-end
+When no failing result is found, use **Diagnosis** exactly as `No issues found
+in the checks performed.` and **Likely cause** exactly as `None identified.` Do
+not invent a failing layer or a repair step. If no relevant checks remain
+unknown or blocked, use **Recommended next action** exactly as `No action needed.`
+Otherwise give one safe step that addresses the unknown or blocked check. Keep
+genuinely skipped or unverified checks in **Unknowns or blocked checks**. A
+passing local check does not prove security, trustworthiness, or end-to-end
 message delivery.

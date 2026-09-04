@@ -128,10 +128,9 @@ def test_pi_extension_disconnect_reports_success_or_failure_after_stop() -> None
     assert "await stopListener(pi, ctx, { expected: true })" in disconnect_body
     assert 'sendConnectionStatus(pi, "disconnected", DISCONNECTED_MESSAGE)' in disconnect_body
     assert (
-        "notify(\n"
+        "notifyCommandFailure(\n"
         '        "[inter-agent] disconnect failed",\n'
         '        "listener did not terminate",\n'
-        '        "error",\n'
         "      )" in disconnect_body
     )
 
@@ -382,7 +381,10 @@ def test_pi_extension_registers_read_only_channels_command() -> None:
     assert '!== "channels_ok"' in channels_body
     assert "Array.isArray" in channels_body
     assert "no channels currently have subscribers" in channels_body
-    assert 'notify("[inter-agent] channels failed", "invalid response", "error")' in channels_body
+    assert (
+        'notifyCommandFailure("[inter-agent] channels failed", '
+        '"invalid response")' in channels_body
+    )
     assert 'name: "inter_agent_channels"' not in content
 
 
@@ -407,7 +409,7 @@ def test_pi_extension_registers_read_only_list_command() -> None:
     assert "listenerProc" not in list_body
     assert "startListener" not in list_body
     assert 'notify("[inter-agent] list", "no agents connected")' in list_body
-    assert 'notify("[inter-agent] list failed", "invalid response", "error")' in list_body
+    assert 'notifyCommandFailure("[inter-agent] list failed", "invalid response")' in list_body
 
     # The list response shape is validated before rendering.
     assert "function parseListSessions" in content
@@ -611,8 +613,22 @@ def test_pi_package_declares_pi_runtime_peers() -> None:
 
 def test_pi_doctor_skill_is_explicit_only_and_read_only() -> None:
     skill = PI_SKILL.read_text(encoding="utf-8")
+    skill_prose = " ".join(skill.split())
+    readme = (ROOT / "README.md").read_text(encoding="utf-8")
+    readme_prose = " ".join(readme.split())
 
     assert "name: inter-agent-doctor" in skill
+    assert "/inter-agent doctor [optional context]" in readme
+    assert "After installing and opening Pi" in readme_prose
+    assert "primary setup and troubleshooting path" in readme_prose
+    assert "bounded, read-only diagnostics" in readme_prose
+    assert "never auto-repairs" in readme_prose
+    assert "fallback secret resolution can create or chmod" in readme_prose
+    assert "prefer explicit absolute paths" in readme_prose
+    assert "relative paths remain supported" in readme_prose
+    assert "No issues found in the checks performed." in readme_prose
+    assert "None identified." in readme_prose
+    assert "No action needed." in readme_prose
     assert "description:" in skill
     assert "disable-model-invocation: true" in skill
     assert "`/inter-agent doctor [optional context]`" in skill
@@ -634,6 +650,9 @@ def test_pi_doctor_skill_is_explicit_only_and_read_only() -> None:
         "full configuration/state dumps",
     ):
         assert phrase in skill
+    assert "No issues found in the checks performed." in skill_prose
+    assert "None identified." in skill_prose
+    assert "No action needed." in skill_prose
 
 
 def test_pi_extension_registers_startup_identity_flag() -> None:

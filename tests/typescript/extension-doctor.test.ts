@@ -1,5 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { EventEmitter } from "node:events";
 import {
   chmodSync,
   mkdirSync,
@@ -210,6 +211,98 @@ test("doctor queues a follow-up while the model is busy", async () => {
   });
 });
 
+test("operational command failures suggest doctor and README", async () => {
+  await withDoctorExtension(async (pi) => {
+    await doctorCommand(pi).handler("send agent-b hello", pi.ctx);
+
+    const failure = pi.ctx.notifications.find(
+      (entry) =>
+        entry.type === "error" && entry.message.includes("send failed"),
+    );
+    assert.ok(failure);
+    assert.match(failure.message, /Not connected to the inter-agent bus/);
+    assert.match(failure.message, /\/inter-agent doctor/);
+    assert.match(failure.message, /README\.md/);
+  });
+});
+
+test("usage failures do not suggest doctor", async () => {
+  await withDoctorExtension(async (pi) => {
+    await doctorCommand(pi).handler("send", pi.ctx);
+
+    const failure = pi.ctx.notifications.find(
+      (entry) =>
+        entry.type === "error" && entry.message.includes("send failed"),
+    );
+    assert.ok(failure);
+    assert.match(failure.message, /usage: \/inter-agent send/);
+    assert.doesNotMatch(failure.message, /\/inter-agent doctor/);
+  });
+});
+
+test("rename validates usage before its disconnected-state failure", async () => {
+  await withDoctorExtension(async (pi) => {
+    await doctorCommand(pi).handler("rename", pi.ctx);
+
+    const failure = pi.ctx.notifications.find(
+      (entry) =>
+        entry.type === "error" && entry.message.includes("rename failed"),
+    );
+    assert.ok(failure);
+    assert.match(failure.message, /usage: \/inter-agent rename/);
+    assert.doesNotMatch(failure.message, /\/inter-agent doctor/);
+  });
+});
+
+test("doctor submission failures do not suggest doctor recursively", async () => {
+  await withDoctorExtension(async (pi) => {
+    pi.sendUserMessage = () => {
+      throw new Error("doctor submission failed");
+    };
+    await doctorCommand(pi).handler("doctor context", pi.ctx);
+
+    const failure = pi.ctx.notifications.find(
+      (entry) =>
+        entry.type === "error" && entry.message.includes("doctor failed"),
+    );
+    assert.ok(failure);
+    assert.match(failure.message, /README\.md/);
+    assert.doesNotMatch(failure.message, /\/inter-agent doctor/);
+  });
+});
+
+test("long command failures retain the doctor hint within the notification bound", async () => {
+  await withDoctorExtension(async (pi) => {
+    _setSpawnForTest((() => {
+      const proc = new EventEmitter() as EventEmitter & {
+        stdout: EventEmitter;
+        stderr: EventEmitter;
+      };
+      proc.stdout = new EventEmitter();
+      proc.stderr = new EventEmitter();
+      queueMicrotask(() => {
+        proc.stderr.emit(
+          "data",
+          Buffer.from("inter-agent command was not found " + "x".repeat(5000)),
+        );
+        proc.emit("close", 1);
+      });
+      return proc;
+    }) as never);
+
+    await doctorCommand(pi).handler("list", pi.ctx);
+
+    const failure = pi.ctx.notifications.find(
+      (entry) =>
+        entry.type === "error" && entry.message.includes("list failed"),
+    );
+    assert.ok(failure);
+    assert.ok(failure.message.length <= 1000);
+    assert.match(failure.message, /\/inter-agent doctor/);
+    assert.match(failure.message, /README\.md/);
+  });
+});
+
 test("doctor checks command availability and fails boundedly when missing", async () => {
   await withDoctorExtension(async (pi) => {
     pi.doctorSkillAvailable = false;
@@ -229,6 +322,8 @@ test("doctor checks command availability and fails boundedly when missing", asyn
     );
     assert.ok(failure);
     assert.ok(failure.message.length < 200);
+    assert.match(failure.message, /README\.md/);
+    assert.doesNotMatch(failure.message, /\/inter-agent doctor/);
   });
 });
 
