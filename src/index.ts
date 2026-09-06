@@ -63,9 +63,23 @@ export function _setReloadCarrierForTest(
 ): void {
   reloadCarrierOverride = carrier;
 }
-import { accessSync, constants, existsSync, readFileSync } from "node:fs";
+import {
+  accessSync,
+  constants,
+  existsSync,
+  lstatSync,
+  readFileSync,
+  realpathSync,
+} from "node:fs";
 import { homedir } from "node:os";
-import { delimiter, dirname, isAbsolute, join, resolve } from "node:path";
+import {
+  delimiter,
+  dirname,
+  isAbsolute,
+  join,
+  relative,
+  resolve,
+} from "node:path";
 
 import {
   MAILBOX_MAX_UNREAD,
@@ -128,14 +142,16 @@ interface Settings {
   interAgent?: RawInterAgentConfig;
 }
 
-const MANAGED_RUNTIME_VENV = join(
-  homedir(),
-  ".pi",
-  "agent",
-  "inter-agent",
-  "venv",
-);
+function managedRuntimeVenv(): string {
+  return join(homedir(), ".pi", "agent", "inter-agent", "venv");
+}
+
 const RUNTIME_SETUP_DOCS = "README.md";
+const SETUP_PYTHON_ENV = "INTER_AGENT_PI_SETUP_PYTHON";
+const SETUP_SOURCE_ENV = "INTER_AGENT_PI_SETUP_SOURCE";
+const SETUP_HELPER_REQUIREMENT = "inter-agent-pi~=0.3.1";
+const SETUP_OUTPUT_MAX_BYTES = 8 * 1024;
+const SETUP_PROCESS_TIMEOUT_MS = 120_000;
 const PROJECT_PATHS_CONFIG_ERROR =
   "interAgent.projectPaths must be a non-empty list of non-empty strings";
 const LEGACY_PROJECT_PATH_ERROR =
@@ -279,11 +295,14 @@ function loadConfig(): InterAgentConfig {
   return config;
 }
 
+type FailureRemedy = "setup" | "doctor";
+
 interface InterAgentScripts {
   pi: string;
   connect: string;
   server: string;
   unavailableMessage?: string;
+  unavailableRemedy?: FailureRemedy;
 }
 
 function isExecutable(path: string): boolean {
@@ -304,28 +323,217 @@ function scriptsFromBinDir(binDir: string): InterAgentScripts {
 }
 
 function scriptsAvailable(scripts: InterAgentScripts): boolean {
-  return (
-    isExecutable(scripts.pi) &&
-    isExecutable(scripts.connect) &&
-    isExecutable(scripts.server)
+  return [scripts.pi, scripts.connect, scripts.server].every(
+    (script) => regularExecutable(script) && viableInterpreter(script),
   );
 }
 
-function findPathCommand(command: string): string | null {
-  for (const dir of (process.env.PATH || "").split(delimiter)) {
-    if (!dir) continue;
-    const candidate = join(dir, command);
-    if (isExecutable(candidate)) return candidate;
+function regularExecutable(path: string): boolean {
+  try {
+    return lstatSync(path).isFile() && isExecutable(path);
+  } catch {
+    return false;
+  }
+}
+
+function viableInterpreter(path: string): boolean {
+  try {
+    const firstLine = readFileSync(path, "utf8").split(/\r?\n/, 1)[0];
+    if (!firstLine.startsWith("#!")) return false;
+    const parts = firstLine.slice(2).trim().split(/\s+/).filter(Boolean);
+    if (parts.length === 0) return false;
+    if (parts[0] === "/usr/bin/env") {
+      const interpreter = parts.slice(1).find((part) => !part.startsWith("-"));
+      return interpreter ? findPathCommand(interpreter) !== null : false;
+    }
+    return isExecutable(parts[0]);
+  } catch {
+    return false;
+  }
+}
+
+function managedHelpersUsable(): boolean {
+  const scripts = scriptsFromBinDir(join(managedRuntimeVenv(), "bin"));
+  return [scripts.pi, scripts.connect, scripts.server].every(
+    (script) => regularExecutable(script) && viableInterpreter(script),
+  );
+}
+
+type ManagedRuntimeState =
+  | { kind: "missing" }
+  | { kind: "healthy" }
+  | { kind: "broken"; reason: string }
+  | { kind: "unsafe"; reason: string };
+type SafeManagedRuntimeState = Exclude<ManagedRuntimeState, { kind: "unsafe" }>;
+
+function pathIsWithinHome(target: string): boolean {
+  const home = resolve(homedir());
+  if (target === resolve("/") || target === home) return false;
+  const relativeTarget = relative(home, target);
+  if (
+    !relativeTarget ||
+    relativeTarget.startsWith(`..${delimiter}`) ||
+    relativeTarget === ".."
+  ) {
+    return false;
+  }
+
+  let existing = target;
+  while (!existsSync(existing)) {
+    const parent = dirname(existing);
+    if (parent === existing) return false;
+    existing = parent;
+  }
+  try {
+    const realHome = realpathSync(home);
+    const realExisting = realpathSync(existing);
+    const realRelative = relative(realHome, realExisting);
+    return (
+      realRelative === "" ||
+      (realRelative !== ".." &&
+        !realRelative.startsWith(`..${delimiter}`) &&
+        !isAbsolute(realRelative))
+    );
+  } catch {
+    return false;
+  }
+}
+
+function classifyManagedRuntime(): ManagedRuntimeState {
+  const target = resolve(managedRuntimeVenv());
+  if (!pathIsWithinHome(target)) {
+    return { kind: "unsafe", reason: "managed environment path is unsafe" };
+  }
+
+  let targetStat;
+  try {
+    targetStat = lstatSync(target);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") {
+      return { kind: "missing" };
+    }
+    return {
+      kind: "unsafe",
+      reason: "managed environment cannot be inspected",
+    };
+  }
+  if (targetStat.isSymbolicLink()) {
+    return { kind: "unsafe", reason: "managed environment is a symlink" };
+  }
+  if (!targetStat.isDirectory()) {
+    return { kind: "unsafe", reason: "managed environment is not a directory" };
+  }
+
+  const marker = join(target, "pyvenv.cfg");
+  try {
+    if (!lstatSync(marker).isFile()) {
+      return {
+        kind: "unsafe",
+        reason: "managed environment is not a verified venv",
+      };
+    }
+  } catch {
+    return {
+      kind: "unsafe",
+      reason: "managed environment is not a verified venv",
+    };
+  }
+
+  const python = join(target, "bin", "python");
+  if (!isExecutable(python) || !managedHelpersUsable()) {
+    return {
+      kind: "broken",
+      reason: "managed environment is incomplete or unusable",
+    };
+  }
+  return { kind: "healthy" };
+}
+
+function setupPython(): string {
+  return process.env[SETUP_PYTHON_ENV]?.trim() || "python3";
+}
+
+function setupSource(): string {
+  return process.env[SETUP_SOURCE_ENV]?.trim() || SETUP_HELPER_REQUIREMENT;
+}
+
+function setupSourceDescription(): string {
+  return process.env[SETUP_SOURCE_ENV]?.trim()
+    ? `an explicit ${SETUP_SOURCE_ENV} override`
+    : SETUP_HELPER_REQUIREMENT;
+}
+
+function setupOverrideWarning(config: InterAgentConfig): string | null {
+  if (process.env.INTER_AGENT_PI_HELPER?.trim()) {
+    return "INTER_AGENT_PI_HELPER remains higher precedence, so the managed environment is inactive while that override is configured; run /inter-agent doctor if this is unintended";
+  }
+  if (config.projectPathsExplicit) {
+    return "configured interAgent.projectPaths remain higher precedence, so the managed environment is inactive while those paths are configured; run /inter-agent doctor if this is unintended";
   }
   return null;
 }
 
-function pathScripts(): InterAgentScripts | null {
-  const pi = findPathCommand("inter-agent-pi");
-  const connect = findPathCommand("inter-agent-connect");
-  const server = findPathCommand("inter-agent-server");
-  if (!pi || !connect || !server) return null;
-  return { pi, connect, server };
+function setupEnvironment(): NodeJS.ProcessEnv {
+  const env: NodeJS.ProcessEnv = { ...process.env };
+  for (const key of Object.keys(env)) {
+    if (
+      key === "PYTHONPATH" ||
+      key === "PYTHONHOME" ||
+      key === "VIRTUAL_ENV" ||
+      key.startsWith("PIP_") ||
+      key === "INTER_AGENT_SECRET" ||
+      key === "INTER_AGENT_TLS_KEY" ||
+      key === "INTER_AGENT_TLS_CERT"
+    ) {
+      delete env[key];
+    }
+  }
+  env.PYTHONUNBUFFERED = "1";
+  return env;
+}
+
+function findPathEntries(command: string): string[] {
+  const entries: string[] = [];
+  for (const dir of (process.env.PATH || "").split(delimiter)) {
+    if (!dir) continue;
+    const candidate = join(dir, command);
+    if (existsSync(candidate)) entries.push(candidate);
+  }
+  return entries;
+}
+
+function findPathCommand(command: string): string | null {
+  return (
+    findPathEntries(command).find((candidate) => isExecutable(candidate)) ??
+    null
+  );
+}
+
+function pathScripts(): {
+  scripts: InterAgentScripts | null;
+  partial: boolean;
+} {
+  const entries = [
+    findPathEntries("inter-agent-pi"),
+    findPathEntries("inter-agent-connect"),
+    findPathEntries("inter-agent-server"),
+  ];
+  const executable = entries.map(
+    (candidates) =>
+      candidates.find((candidate) => isExecutable(candidate)) ?? null,
+  );
+  const present = entries.filter((candidates) => candidates.length > 0).length;
+  if (executable.every(Boolean)) {
+    return {
+      scripts: {
+        pi: executable[0]!,
+        connect: executable[1]!,
+        server: executable[2]!,
+      },
+      partial: false,
+    };
+  }
+  return { scripts: null, partial: present > 0 };
 }
 
 function missingConfiguredProjectPathsMessage(paths: string[]): string {
@@ -334,7 +542,7 @@ function missingConfiguredProjectPathsMessage(paths: string[]): string {
 }
 
 function setupNeededMessage(): string {
-  return `inter-agent setup needed. See ${RUNTIME_SETUP_DOCS}`;
+  return `inter-agent managed runtime is not installed. See ${RUNTIME_SETUP_DOCS}`;
 }
 
 function getScripts(config: InterAgentConfig): InterAgentScripts {
@@ -346,17 +554,19 @@ function getScripts(config: InterAgentConfig): InterAgentScripts {
       return {
         ...scripts,
         unavailableMessage: `inter-agent helper override is invalid at ${expanded}. See ${RUNTIME_SETUP_DOCS}`,
+        unavailableRemedy: "doctor",
       };
     }
     return scripts;
   }
 
   if (config.projectPathsExplicit) {
-    const managedScripts = scriptsFromBinDir(join(MANAGED_RUNTIME_VENV, "bin"));
+    const managedScripts = scriptsFromBinDir(join(managedRuntimeVenv(), "bin"));
     if (config.projectPathsError) {
       return {
         ...managedScripts,
         unavailableMessage: `${config.projectPathsError}. See ${RUNTIME_SETUP_DOCS}`,
+        unavailableRemedy: "doctor",
       };
     }
 
@@ -369,16 +579,44 @@ function getScripts(config: InterAgentConfig): InterAgentScripts {
     return {
       ...managedScripts,
       unavailableMessage: missingConfiguredProjectPathsMessage(projectPaths),
+      unavailableRemedy: "doctor",
     };
   }
 
-  const managedScripts = scriptsFromBinDir(join(MANAGED_RUNTIME_VENV, "bin"));
-  if (scriptsAvailable(managedScripts)) return managedScripts;
+  const managedScripts = scriptsFromBinDir(join(managedRuntimeVenv(), "bin"));
+  const managedState = classifyManagedRuntime();
+  if (managedState.kind === "unsafe") {
+    return {
+      ...managedScripts,
+      unavailableMessage: `${managedState.reason}. See ${RUNTIME_SETUP_DOCS}`,
+      unavailableRemedy: "doctor",
+    };
+  }
+  if (managedState.kind === "broken") {
+    return {
+      ...managedScripts,
+      unavailableMessage: `${managedState.reason}. See ${RUNTIME_SETUP_DOCS}`,
+      unavailableRemedy: "setup",
+    };
+  }
+  if (managedState.kind === "healthy") return managedScripts;
 
   const fromPath = pathScripts();
-  if (fromPath) return fromPath;
+  if (fromPath.scripts && scriptsAvailable(fromPath.scripts))
+    return fromPath.scripts;
+  if (fromPath.partial || fromPath.scripts) {
+    return {
+      ...managedScripts,
+      unavailableMessage: "PATH inter-agent runtime is incomplete or unusable",
+      unavailableRemedy: "doctor",
+    };
+  }
 
-  return { ...managedScripts, unavailableMessage: setupNeededMessage() };
+  return {
+    ...managedScripts,
+    unavailableMessage: setupNeededMessage(),
+    unavailableRemedy: "setup",
+  };
 }
 
 function interAgentEnv(
@@ -449,7 +687,11 @@ interface ScriptResult {
   code: number | null;
 }
 
-type FailureNotifier = (title: string, body: string) => void;
+type FailureNotifier = (
+  title: string,
+  body: string,
+  remedy?: FailureRemedy,
+) => void;
 
 interface ListenerOptions {
   notifyOnReady?: boolean;
@@ -502,6 +744,18 @@ function parseListSessions(value: unknown): ListSession[] {
     throw new Error("invalid response");
   }
   return sessions as ListSession[];
+}
+
+function formatListSessions(sessions: ListSession[]): string {
+  return [...sessions]
+    .sort((left, right) =>
+      left.name === right.name ? 0 : left.name < right.name ? -1 : 1,
+    )
+    .map(
+      (session) =>
+        `• ${session.name}${session.label ? ` (${session.label})` : ""}`,
+    )
+    .join("\n");
 }
 
 // Compact one-line summary for the collapsed message renderer.
@@ -557,10 +811,18 @@ function notify(
 
 const PI_DOCTOR_FAILURE_HINT =
   "Run /inter-agent doctor for bounded diagnostics and check the Pi extension README.md for setup guidance.";
+const PI_SETUP_FAILURE_HINT =
+  "Run /inter-agent setup to create or repair the managed helper environment.";
 
-function notifyCommandFailure(title: string, body: string): void {
+function notifyCommandFailure(
+  title: string,
+  body: string,
+  remedy: FailureRemedy = "doctor",
+): void {
   const separator = /[.!?]$/.test(body) ? "" : ".";
-  const suffix = `${separator} ${PI_DOCTOR_FAILURE_HINT}`;
+  const hint =
+    remedy === "setup" ? PI_SETUP_FAILURE_HINT : PI_DOCTOR_FAILURE_HINT;
+  const suffix = `${separator} ${hint}`;
   const maxBodyLength = Math.max(
     0,
     NOTIFY_MAX_LEN - title.length - 2 - suffix.length,
@@ -572,8 +834,8 @@ function notifyCommandFailure(title: string, body: string): void {
   notify(title, `${boundedBody}${suffix}`, "error");
 }
 
-const notifyDefaultFailure: FailureNotifier = (title, body) =>
-  notify(title, body, "error");
+const notifyDefaultFailure: FailureNotifier = (title, body, remedy) =>
+  notifyCommandFailure(title, body, remedy);
 
 function sendConnectionStatus(
   pi: ExtensionAPI,
@@ -695,6 +957,88 @@ function execScript(script: string, args: string[]): Promise<ScriptResult> {
   });
 }
 
+interface BoundedProcessResult extends ScriptResult {
+  timedOut: boolean;
+  outputExceeded: boolean;
+}
+
+function runBoundedProcess(
+  command: string,
+  args: string[],
+): Promise<BoundedProcessResult> {
+  return new Promise((resolve) => {
+    const env = setupEnvironment();
+    const proc = spawnChildProcess(command, args, {
+      stdio: ["ignore", "pipe", "pipe"],
+      shell: false,
+      env,
+    });
+    let stdout = "";
+    let stderr = "";
+    let stdoutBytes = 0;
+    let stderrBytes = 0;
+    let timedOut = false;
+    let outputExceeded = false;
+    let settled = false;
+    let timer: ReturnType<typeof setTimeout> | null = null;
+
+    const finish = (code: number | null): void => {
+      if (settled) return;
+      settled = true;
+      if (timer) clearTimeout(timer);
+      resolve({ stdout, stderr, code, timedOut, outputExceeded });
+    };
+    const append = (chunk: Buffer, stream: "stdout" | "stderr"): void => {
+      const currentBytes = stream === "stdout" ? stdoutBytes : stderrBytes;
+      const remaining = SETUP_OUTPUT_MAX_BYTES - currentBytes;
+      if (remaining <= 0) {
+        outputExceeded = true;
+        return;
+      }
+      const bounded =
+        chunk.byteLength > remaining ? chunk.subarray(0, remaining) : chunk;
+      if (stream === "stdout") {
+        stdout += bounded.toString();
+        stdoutBytes += chunk.byteLength;
+      } else {
+        stderr += bounded.toString();
+        stderrBytes += chunk.byteLength;
+      }
+      if (chunk.byteLength > remaining) {
+        outputExceeded = true;
+      }
+    };
+
+    proc.stdout?.on("data", (chunk: Buffer) => append(chunk, "stdout"));
+    proc.stderr?.on("data", (chunk: Buffer) => append(chunk, "stderr"));
+    proc.once("close", (code) => finish(code));
+    proc.once("error", (error) => {
+      stderr = String(error);
+      finish(null);
+    });
+    timer = setTimeout(() => {
+      timedOut = true;
+      try {
+        proc.kill("SIGKILL");
+      } catch {
+        // The process may have exited before the timeout fired.
+      }
+      finish(null);
+    }, SETUP_PROCESS_TIMEOUT_MS);
+    timer.unref?.();
+  });
+}
+
+function setupProcessFailure(
+  stage: string,
+  result: BoundedProcessResult,
+): string {
+  if (result.timedOut) return `${stage} timed out`;
+  if (result.outputExceeded) return `${stage} produced too much output`;
+  if (result.code === null) return `${stage} could not be started`;
+  return `${stage} failed (exit ${result.code})`;
+}
+
 function execPiScript(
   scripts: InterAgentScripts,
   args: string[],
@@ -724,15 +1068,161 @@ function scriptFailureMessage(result: ScriptResult, operation: string): string {
   return truncate(output || `inter-agent ${operation} command failed`, 200);
 }
 
+function managedPythonPath(): string {
+  return join(managedRuntimeVenv(), "bin", "python");
+}
+
+function setupVersionFailure(output: string): string | null {
+  const match = output.match(/Python\s+(\d+)\.(\d+)/i);
+  if (!match) return "selected Python did not report a usable version";
+  const major = Number(match[1]);
+  const minor = Number(match[2]);
+  return major > 3 || (major === 3 && minor >= 10)
+    ? null
+    : "Python 3.10 or newer is required";
+}
+
+async function setupManagedRuntime(): Promise<
+  { ok: true } | { ok: false; message: string }
+> {
+  const python = setupPython();
+  const source = setupSource();
+  const state = classifyManagedRuntime();
+  if (state.kind === "unsafe") {
+    return { ok: false, message: `${state.reason}; no files were changed` };
+  }
+
+  const version = await runBoundedProcess(python, ["-I", "--version"]);
+  if (version.code !== 0) {
+    return { ok: false, message: setupProcessFailure("Python check", version) };
+  }
+  const versionFailure = setupVersionFailure(
+    `${version.stdout}\n${version.stderr}`,
+  );
+  if (versionFailure) return { ok: false, message: versionFailure };
+
+  let targetState: SafeManagedRuntimeState = state;
+  if (targetState.kind === "missing") {
+    const created = await runBoundedProcess(python, [
+      "-I",
+      "-m",
+      "venv",
+      managedRuntimeVenv(),
+    ]);
+    if (created.code !== 0) {
+      return {
+        ok: false,
+        message: setupProcessFailure("virtual environment creation", created),
+      };
+    }
+  } else if (targetState.kind === "broken") {
+    const repaired = await runBoundedProcess(python, [
+      "-I",
+      "-m",
+      "venv",
+      "--clear",
+      managedRuntimeVenv(),
+    ]);
+    if (repaired.code !== 0) {
+      return {
+        ok: false,
+        message: setupProcessFailure("managed environment repair", repaired),
+      };
+    }
+  } else {
+    const pipCheck = await runBoundedProcess(managedPythonPath(), [
+      "-I",
+      "-m",
+      "pip",
+      "--isolated",
+      "--version",
+    ]);
+    if (pipCheck.code !== 0) {
+      const reclassified = classifyManagedRuntime();
+      if (reclassified.kind === "unsafe") {
+        return {
+          ok: false,
+          message: `${reclassified.reason}; no files were changed`,
+        };
+      }
+      targetState = reclassified;
+      if (targetState.kind !== "broken" && targetState.kind !== "healthy") {
+        return {
+          ok: false,
+          message:
+            "managed environment pip is unusable and safe repair was not verified",
+        };
+      }
+      const repaired = await runBoundedProcess(python, [
+        "-I",
+        "-m",
+        "venv",
+        "--clear",
+        managedRuntimeVenv(),
+      ]);
+      if (repaired.code !== 0) {
+        return {
+          ok: false,
+          message: setupProcessFailure("managed environment repair", repaired),
+        };
+      }
+    }
+  }
+
+  const pip = await runBoundedProcess(managedPythonPath(), [
+    "-I",
+    "-m",
+    "pip",
+    "--isolated",
+    "--version",
+  ]);
+  if (pip.code !== 0) {
+    return {
+      ok: false,
+      message: setupProcessFailure("managed pip check", pip),
+    };
+  }
+  const installed = await runBoundedProcess(managedPythonPath(), [
+    "-I",
+    "-m",
+    "pip",
+    "--isolated",
+    "install",
+    "--upgrade",
+    "--no-cache-dir",
+    "--",
+    source,
+  ]);
+  if (installed.code !== 0) {
+    return {
+      ok: false,
+      message: setupProcessFailure("helper installation", installed),
+    };
+  }
+  if (!managedHelpersUsable()) {
+    return {
+      ok: false,
+      message:
+        "helper installation completed without all verified executable commands",
+    };
+  }
+  return { ok: true };
+}
+
 async function readServerStatus(
   scripts: InterAgentScripts,
 ): Promise<
   | { ok: true; payload: Record<string, unknown> }
-  | { ok: false; message: string }
+  | { ok: false; message: string; remedy?: FailureRemedy }
 > {
   const result = await execPiScript(scripts, ["status", "--json"]);
   if (result.code !== 0) {
-    return { ok: false, message: scriptFailureMessage(result, "status") };
+    return {
+      ok: false,
+      message:
+        scripts.unavailableMessage || scriptFailureMessage(result, "status"),
+      remedy: scripts.unavailableRemedy,
+    };
   }
 
   try {
@@ -864,7 +1354,11 @@ async function ensureServerAvailable(
 ): Promise<boolean> {
   const initial = await readServerStatus(scripts);
   if (initial.ok === false) {
-    failureNotifier("[inter-agent] connect failed", initial.message);
+    failureNotifier(
+      "[inter-agent] connect failed",
+      initial.message,
+      initial.remedy,
+    );
     return false;
   }
 
@@ -882,7 +1376,11 @@ async function ensureServerAvailable(
 
   const started = await startServerProcess(scripts);
   if (started.ok === false) {
-    failureNotifier("[inter-agent] connect failed", started.message);
+    failureNotifier(
+      "[inter-agent] connect failed",
+      started.message,
+      scripts.unavailableRemedy,
+    );
     return false;
   }
 
@@ -1011,7 +1509,11 @@ async function startListener(
   }
   const scripts = getScripts(config);
   if (scripts.unavailableMessage) {
-    reportFailure("[inter-agent] listener error", scripts.unavailableMessage);
+    reportFailure(
+      "[inter-agent] listener error",
+      scripts.unavailableMessage,
+      scripts.unavailableRemedy,
+    );
     return false;
   }
   const args = ["connect", name];
@@ -1936,6 +2438,11 @@ export default function (pi: ExtensionAPI) {
     },
     { value: "list", label: "list", description: "List connected sessions" },
     {
+      value: "setup",
+      label: "setup",
+      description: "Create or repair the managed helper environment",
+    },
+    {
       value: "status",
       label: "status",
       description: "Check server status",
@@ -2357,6 +2864,68 @@ export default function (pi: ExtensionAPI) {
     );
   }
 
+  async function handleSetup(args: string, ctx: ExtensionContext) {
+    if (args.trim()) {
+      notify(
+        "[inter-agent] setup failed",
+        "usage: /inter-agent setup",
+        "error",
+      );
+      return;
+    }
+
+    const state = classifyManagedRuntime();
+    if (state.kind === "unsafe") {
+      notifyCommandFailure(
+        "[inter-agent] setup failed",
+        `${state.reason}; no files were changed`,
+        "doctor",
+      );
+      return;
+    }
+
+    const overrideWarning = setupOverrideWarning(config);
+    const action =
+      state.kind === "missing"
+        ? "create"
+        : state.kind === "broken"
+          ? "repair"
+          : "update";
+    let approved = false;
+    try {
+      approved = await ctx.ui.confirm(
+        "Inter-agent setup",
+        `This will ${action} the managed Python helper environment at ${managedRuntimeVenv()} and install ${setupSourceDescription()}. It may modify files and use the network. Endpoint, secret, Core, and mailbox state will not be changed.${overrideWarning ? ` ${overrideWarning}.` : ""} Continue?`,
+      );
+    } catch {
+      notifyCommandFailure(
+        "[inter-agent] setup failed",
+        "could not show the approval prompt",
+        "doctor",
+      );
+      return;
+    }
+    if (!approved) {
+      notify("[inter-agent] setup", "setup cancelled");
+      return;
+    }
+
+    const result = await setupManagedRuntime();
+    if ("message" in result) {
+      notifyCommandFailure(
+        "[inter-agent] setup failed",
+        result.message,
+        "doctor",
+      );
+      return;
+    }
+    notify(
+      "[inter-agent] setup",
+      `managed helper environment ready at ${managedRuntimeVenv()}.${overrideWarning ? ` ${overrideWarning}.` : ""}`,
+      overrideWarning ? "warning" : "info",
+    );
+  }
+
   async function handleList(_args: string, _ctx: ExtensionContext) {
     const result = await execPiScript(currentScripts(), ["list", "--json"]);
     if (result.code !== 0) {
@@ -2368,13 +2937,11 @@ export default function (pi: ExtensionAPI) {
     }
     try {
       const sessions = parseListSessions(JSON.parse(result.stdout));
-      const lines = sessions.map(
-        (s) => `• ${s.name}${s.label ? ` (${s.label})` : ""}`,
-      );
-      if (lines.length === 0) {
+      const lines = formatListSessions(sessions);
+      if (!lines) {
         notify("[inter-agent] list", "no agents connected");
       } else {
-        notify("[inter-agent] list", lines.join(", "));
+        notify("[inter-agent] list", lines);
       }
     } catch {
       notifyCommandFailure("[inter-agent] list failed", "invalid response");
@@ -2458,7 +3025,7 @@ export default function (pi: ExtensionAPI) {
   function showInterAgentUsage() {
     notify(
       "[inter-agent] usage",
-      "usage: /inter-agent <connect|disconnect|kick|rename|send|broadcast|publish|channels|subscribe|unsubscribe|list|status|doctor|delivery> [args]; control: /inter-agent control <target> <command> [text]",
+      "usage: /inter-agent <connect|disconnect|kick|rename|send|broadcast|publish|channels|subscribe|unsubscribe|list|setup|status|doctor|delivery> [args]; control: /inter-agent control <target> <command> [text]",
       "warning",
     );
   }
@@ -2512,6 +3079,9 @@ export default function (pi: ExtensionAPI) {
           break;
         case "list":
           await handleList(rest, ctx);
+          break;
+        case "setup":
+          await handleSetup(rest, ctx);
           break;
         case "status":
           await handleStatus(rest, ctx);
@@ -2694,14 +3264,11 @@ export default function (pi: ExtensionAPI) {
       }
       try {
         const sessions = parseListSessions(JSON.parse(result.stdout));
-        const lines = sessions.map(
-          (s) => `• ${s.name}${s.label ? ` (${s.label})` : ""}`,
-        );
         return {
           content: [
             {
               type: "text" as const,
-              text: lines.join("\n") || "No agents connected",
+              text: formatListSessions(sessions) || "No agents connected",
             },
           ],
           details: { sessions },

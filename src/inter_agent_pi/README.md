@@ -3,7 +3,8 @@
 Pi-facing command UX built on top of the universal core protocol. Pi users should run `inter-agent-pi` commands rather than the lower-level core protocol commands.
 
 The command examples below use `uv run` from a source checkout. For the
-released managed installation, invoke the same commands through
+released managed installation, Pi's `/inter-agent setup` creates the
+`$HOME/.pi/agent/inter-agent/venv` environment; invoke the same commands through
 `$HOME/.pi/agent/inter-agent/venv/bin/inter-agent-pi` instead. For example:
 
 ```bash
@@ -70,7 +71,7 @@ Subscriptions are retained across transient listener reconnects: the listener re
 
 Pi command output is JSON-oriented. Stdout is reserved for protocol or status payloads that host tooling can parse. Stderr is reserved for local diagnostics such as connection failures. Normal operational failures do not emit Python tracebacks.
 
-`connect`, `send`, `broadcast`, and `list` print core protocol envelopes as JSON lines. `list` returns agent sessions sorted by routing name and excludes control sessions. `status` prints a JSON status object with `state`, `host`, `port`, `server_reachable`, `message`, `core_list_supported`, and `adapter_list_exposed` fields. `state` is one of `available`, `unavailable`, `auth_failed`, or `protocol_mismatch`; `status` returns exit code 0 so host tooling can inspect the state field.
+`connect`, `send`, `broadcast`, and `list` print core protocol envelopes as JSON lines. `list` returns agent sessions sorted by routing name and excludes control sessions. The Pi extension presents connected clients alphabetically, one client per line. `status` prints a JSON status object with `state`, `host`, `port`, `server_reachable`, `message`, `core_list_supported`, and `adapter_list_exposed` fields. `state` is one of `available`, `unavailable`, `auth_failed`, or `protocol_mismatch`; `status` returns exit code 0 so host tooling can inspect the state field.
 
 Pi commands connect to the configured endpoint and authenticate with shared-secret challenge-response. Connection failures return a non-zero exit code for message, list, and shutdown operations. Protocol error envelopes returned to `send` or `broadcast`, such as `UNKNOWN_TARGET`, are printed to stdout and return a non-zero exit code. `shutdown` uses an authenticated control connection, prints `{"op": "shutdown_ok"}` on success, and closes connected sessions with a normal server-shutdown close.
 

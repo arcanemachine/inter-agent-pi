@@ -342,7 +342,7 @@ def test_pi_extension_registers_user_publish_command() -> None:
     assert 'value: "publish"' in content
     assert (
         "usage: /inter-agent <connect|disconnect|kick|rename|send|broadcast|"
-        "publish|channels|subscribe|unsubscribe|list|status|doctor|delivery> [args]"
+        "publish|channels|subscribe|unsubscribe|list|setup|status|doctor|delivery> [args]"
     ) in content
     assert 'case "publish":' in content
     assert "async function handlePublish" in content
@@ -367,7 +367,7 @@ def test_pi_extension_registers_read_only_channels_command() -> None:
     assert 'value: "channels"' in content
     assert (
         "usage: /inter-agent <connect|disconnect|kick|rename|send|broadcast|"
-        "publish|channels|subscribe|unsubscribe|list|status|doctor|delivery> [args]"
+        "publish|channels|subscribe|unsubscribe|list|setup|status|doctor|delivery> [args]"
     ) in content
     assert 'case "channels":' in content
     assert "async function handleChannels" in content
@@ -394,7 +394,7 @@ def test_pi_extension_registers_read_only_list_command() -> None:
     assert 'value: "list"' in content
     assert (
         "usage: /inter-agent <connect|disconnect|kick|rename|send|broadcast|"
-        "publish|channels|subscribe|unsubscribe|list|status|doctor|delivery> [args]"
+        "publish|channels|subscribe|unsubscribe|list|setup|status|doctor|delivery> [args]"
     ) in content
     assert 'case "list":' in content
     assert "async function handleList" in content
@@ -442,7 +442,7 @@ def test_pi_extension_registers_user_subscription_commands() -> None:
     assert 'value: "unsubscribe"' in content
     assert (
         "usage: /inter-agent <connect|disconnect|kick|rename|send|broadcast|"
-        "publish|channels|subscribe|unsubscribe|list|status|doctor|delivery> [args]"
+        "publish|channels|subscribe|unsubscribe|list|setup|status|doctor|delivery> [args]"
     ) in content
 
     # Both subcommands are dispatched from the grouped command handler.
@@ -512,7 +512,7 @@ def test_pi_extension_registers_user_only_kick_command() -> None:
     # Updated grouped usage advertises kick alongside disconnect.
     assert (
         "usage: /inter-agent <connect|disconnect|kick|rename|send|broadcast|"
-        "publish|channels|subscribe|unsubscribe|list|status|doctor|delivery> [args]"
+        "publish|channels|subscribe|unsubscribe|list|setup|status|doctor|delivery> [args]"
     ) in content
 
     # Kick does not require the local Pi listener (short-lived control path).
@@ -565,7 +565,7 @@ def test_pi_extension_reports_runtime_setup_guidance() -> None:
     assert "config.projectPathsExplicit" in content
     assert "missingConfiguredProjectPathsMessage(projectPaths)" in content
     assert "config.projectPathsError" in content
-    assert "MANAGED_RUNTIME_VENV" in content
+    assert "managedRuntimeVenv" in content
     assert "pathScripts()" in content
     assert "setupNeededMessage()" in content
     assert "scripts.unavailableMessage" in content
@@ -620,7 +620,8 @@ def test_pi_doctor_skill_is_explicit_only_and_read_only() -> None:
     assert "name: inter-agent-doctor" in skill
     assert "/inter-agent doctor [optional context]" in readme
     assert "After installing and opening Pi" in readme_prose
-    assert "primary setup and troubleshooting path" in readme_prose
+    assert "run `/inter-agent setup` for the approved" in readme_prose
+    assert "primary read-only troubleshooting path" in readme_prose
     assert "bounded, read-only diagnostics" in readme_prose
     assert "never auto-repairs" in readme_prose
     assert "fallback secret resolution can create or chmod" in readme_prose
@@ -1012,3 +1013,58 @@ def test_pi_package_has_test_script_and_test_tsconfig() -> None:
     cfg = json.loads(PI_TSCONFIG_TEST.read_text(encoding="utf-8"))
     assert "src/**/*.ts" in cfg["include"]
     assert "tests/**/*.ts" in cfg["include"]
+
+
+def test_pi_setup_is_explicit_and_uses_managed_python_pip() -> None:
+    content = PI_EXTENSION.read_text(encoding="utf-8")
+
+    assert 'value: "setup"' in content
+    assert 'case "setup":' in content
+    assert "ctx.ui.confirm" in content
+    assert "INTER_AGENT_PI_SETUP_PYTHON" in content
+    assert "INTER_AGENT_PI_SETUP_SOURCE" in content
+    assert 'const SETUP_HELPER_REQUIREMENT = "inter-agent-pi~=0.3.1"' in content
+    assert '"-I",\n      "-m",\n      "venv"' in content
+    assert (
+        '"-I",\n    "-m",\n    "pip",\n    "--isolated",\n    "install",\n    "--upgrade"'
+        in content
+    )
+    assert "managedRuntimeVenv" in content
+    assert "--clear" in content
+    assert "setupEnvironment" in content
+    assert '"--no-cache-dir"' in content
+    assert '"--"' in content
+    assert "shell: false" in content
+    assert "setup cancelled" in content
+    assert "setupSourceDescription" in content
+    assert "setupOverrideWarning" in content
+    assert "bootstrap" not in content
+
+
+def test_pi_setup_rejects_unsafe_targets_and_verifies_helpers() -> None:
+    content = PI_EXTENSION.read_text(encoding="utf-8")
+
+    assert "classifyManagedRuntime" in content
+    assert "isSymbolicLink" in content
+    assert "pyvenv.cfg" in content
+    assert "managedHelpersUsable" in content
+    assert "managedState" in content
+    assert "fromPath.partial" in content
+    assert "findPathEntries" in content
+    assert "regularExecutable" in content
+    assert "viableInterpreter" in content
+    assert "no files were changed" in content
+    assert "SETUP_OUTPUT_MAX_BYTES" in content
+    assert "SETUP_PROCESS_TIMEOUT_MS" in content
+
+
+def test_pi_setup_and_list_guidance_are_distinct() -> None:
+    content = PI_EXTENSION.read_text(encoding="utf-8")
+
+    assert "PI_SETUP_FAILURE_HINT" in content
+    assert "PI_DOCTOR_FAILURE_HINT" in content
+    assert '"Run /inter-agent setup to create or repair' in content
+    assert '"Run /inter-agent doctor for bounded diagnostics' in content
+    assert "formatListSessions" in content
+    assert '.join("\\n")' in content
+    assert 'lines.join(", ")' not in content

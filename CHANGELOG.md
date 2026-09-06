@@ -7,6 +7,14 @@ the split-generation source extracted from the coordinated monorepo
 
 ## Unreleased
 
+- Add explicit `/inter-agent setup` for approval-gated managed Python helper
+  creation and guarded repair using standard `python3 -m venv` and the
+  environment's `python -m pip`; setup accepts the compatible helper range
+  `inter-agent-pi~=0.3.1` and never mutates higher-precedence overrides.
+- Recommend `/inter-agent setup` for missing or repairable managed runtimes and
+  `/inter-agent doctor` for configuration and operational fixes.
+- Present `/inter-agent list` and `inter_agent_list` routing names in
+  deterministic alphabetical order, one connected client per line.
 - Add `/inter-agent doctor [optional context]` to the grouped command. It
   verifies the packaged explicit-only `inter-agent-doctor` skill through Pi's
   command registry, then submits it through `sendUserMessage` with prompt

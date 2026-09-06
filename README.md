@@ -12,7 +12,6 @@ The package contains the Pi extension. Its Python helper, `inter-agent-pi`, star
 
 - [Pi](https://github.com/earendil-works/pi/tree/main/packages/coding-agent)
 - Python 3.10 or newer
-- [`uv`](https://docs.astral.sh/uv/)
 
 The package's Pi coding-agent peer compatibility is `>=0.84.2`. Control and
 the read-only doctor use released public APIs present in Pi `0.84.2` or newer;
@@ -24,34 +23,56 @@ dependencies.
 
 Use this canonical setup for a released installation:
 
-1. Create a dedicated helper environment and install the released Python helper:
-
-   ```bash
-   uv venv "$HOME/.pi/agent/inter-agent/venv"
-   uv pip install \
-     --python "$HOME/.pi/agent/inter-agent/venv/bin/python" \
-     inter-agent-pi==0.3.1
-   ```
-
-2. Install the released Pi extension:
+1. Install the released Pi extension:
 
    ```text
    pi install npm:@arcanemachine/inter-agent-pi@0.3.4
    ```
 
-The npm extension and Python helper are published separately. These examples
-pair extension `0.3.4` with helper `0.3.1`; keep both installed when following
-the released path. The helper installs its compatible `inter-agent-core`
-runtime automatically.
+2. Open Pi and run `/inter-agent setup`. Review the managed destination and
+   compatible helper source, then explicitly approve the operation. Setup uses
+   `python3 -m venv` and the environment's `python -m pip`; end users do not
+   need `uv`, global pip, `sudo`, or a system package manager.
 
-Installation and bus connectivity are separate: the commands above install
-local package files, but do not start a server or connect a Pi session. The
-first `/inter-agent connect` starts a healthy local Core server when needed.
+The npm extension and Python helper are published separately. Extension `0.3.4`
+uses the compatible helper line `inter-agent-pi~=0.3.1` (`>=0.3.1,<0.4.0`),
+so patch releases in the `0.3` line are accepted while `0.4` is excluded. The
+helper installs its compatible `inter-agent-core` runtime automatically.
 
-After installing and opening Pi, use `/inter-agent doctor [optional context]`
-as the primary setup and troubleshooting path, especially after a valid
-inter-agent command fails. It performs bounded, read-only diagnostics and never
-auto-repairs or invokes a repair. If the doctor command itself is unavailable,
+Installation and bus connectivity are separate: installing the extension and
+running setup install local package files, but do not start a server or connect
+a Pi session. The first `/inter-agent connect` starts a healthy local Core
+server when needed.
+
+### Managed setup and recovery
+
+`/inter-agent setup` is the only user-facing managed setup command. It creates
+or updates `$HOME/.pi/agent/inter-agent/venv` after explicit approval and never
+changes endpoint or secret discovery, Core state, credentials, mailbox data,
+listener state, or a configured helper override. A verified incomplete managed
+venv may be repaired with a guarded `python3 -m venv --clear`; an unrecognized
+or unsafe directory is never cleared automatically.
+
+If `/inter-agent connect` reports that the managed runtime is missing or
+repairable, run `/inter-agent setup`. For invalid `INTER_AGENT_PI_HELPER`,
+`interAgent.projectPaths`, PATH helpers, Python/pip failures, endpoint errors,
+authentication failures, or other operational problems, run
+`/inter-agent doctor`. Setup does not repair higher-precedence overrides.
+
+For development or isolated UAT, `INTER_AGENT_PI_SETUP_PYTHON` may name the
+explicit Python executable and `INTER_AGENT_PI_SETUP_SOURCE` may name an
+explicit pip source. These values are passed as direct subprocess arguments;
+there is no shell evaluation or automatic fallback.
+
+Setup failures are bounded and do not automatically retry, invoke doctor, start
+Core, connect a listener, or replay the failed command. `/inter-agent doctor`
+remains explicit and read-only.
+
+After installing and opening Pi, run `/inter-agent setup` for the approved
+managed helper installation. Use `/inter-agent doctor [optional context]` as
+the primary read-only troubleshooting path, especially after a valid
+inter-agent command fails. It performs bounded, read-only diagnostics and
+never auto-repairs or invokes a repair. If the doctor command itself is unavailable,
 check this README's package-loading guidance.
 
 Do not use the standalone `inter-agent-pi status --json` command as a read-only
@@ -86,7 +107,7 @@ The first session receives a Pi notification. The default delivery mode is queue
 
 The core server starts automatically when no healthy server is available. To connect at process startup, use `pi --inter-agent pi-a`.
 
-### Read-only doctor (primary setup and recovery path)
+### Read-only doctor (primary troubleshooting path)
 
 Run `/inter-agent doctor [optional context]` for a bounded, model-guided
 diagnosis of the Pi extension and local inter-agent runtime. The command is
@@ -127,7 +148,8 @@ User commands use `/inter-agent`:
 | `rename <name> [--label <label>]`               | Reconnect under another routing name.                                 |
 | `send <name> <text>`                            | Send a direct message.                                                |
 | `broadcast <text>`                              | Send to every other connected agent. Use only when everyone needs it. |
-| `list`                                          | List connected sessions.                                              |
+| `list`                                          | List connected sessions alphabetically, one client per line.          |
+| `setup`                                         | Create or repair the approved managed Python helper environment.      |
 | `status`                                        | Show helper, endpoint, and server status.                             |
 | `subscribe <channel>` / `unsubscribe <channel>` | Change this listener's channel membership.                            |
 | `publish <channel> <text>` / `channels`         | Publish to or inspect a channel.                                      |
@@ -244,7 +266,7 @@ ordinary tmux remain the baseline.
 
 ## Connection and mailbox behavior
 
-The default mailbox is queued and capped at 128 unread messages. A same-process `/reload` preserves unread messages; an explicit disconnect or process restart begins with an empty mailbox. Transient listener failures use bounded reconnect attempts and restore desired channel subscriptions. Authentication, invalid-name, name-conflict, and kick failures require user action.
+The default mailbox is queued and capped at 128 unread messages. A same-process `/reload` preserves unread messages; an explicit disconnect or process restart begins with an empty mailbox. Transient listener failures use bounded reconnect attempts and restore desired channel subscriptions. Authentication, invalid-name, name-conflict, and kick failures require user action. `/inter-agent list` sorts connected routing names alphabetically and renders one client per line; labels are display metadata and do not affect ordering.
 
 The default bus endpoint is `127.0.0.1:16837`. Local sessions share endpoint, state, and secret discovery through `inter-agent-core`. Loopback transport defaults to plaintext WebSockets; configured or non-loopback deployments can use TLS. TLS failures never fall back automatically to plaintext.
 
@@ -297,23 +319,17 @@ run `/inter-agent status`; if authentication fails, ensure the server and
 clients use the same endpoint, state directory, and secret. Use a separate
 endpoint and data directory for tests.
 
-For a managed-install recovery, recreate only the helper environment and then
-reinstall the released helper and extension:
+For a managed-install recovery, run `/inter-agent setup` and explicitly
+approve the guarded repair. Do not manually delete the managed environment as
+the normal recovery path. Setup refuses to clear a symlink, an unrecognized
+directory, or an unsafe target; use `/inter-agent doctor` for bounded diagnosis
+when it refuses a repair.
 
-```bash
-rm -rf "$HOME/.pi/agent/inter-agent/venv"
-uv venv "$HOME/.pi/agent/inter-agent/venv"
-uv pip install \
-  --python "$HOME/.pi/agent/inter-agent/venv/bin/python" \
-  inter-agent-pi==0.3.1
-pi install npm:@arcanemachine/inter-agent-pi@0.3.4
-```
-
-This removes the managed Python environment, not Pi settings, Core state,
+Setup changes only the managed Python environment, not Pi settings, Core state,
 or unread mailbox data. A virtual environment is specific to its machine and
 Python installation; do not copy one between environments. For a source
 checkout, use its own `uv sync --locked` environment and the source-development
-helper override described below instead of deleting the managed environment.
+helper override described below instead of changing the managed environment.
 
 ## Development and security
 
