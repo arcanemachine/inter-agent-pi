@@ -125,7 +125,10 @@ class FakeCtx {
 
 class FakePi {
   readonly commands = new Map<string, { handler: Handler }>();
-  readonly tools = new Map<string, { execute: Handler }>();
+  readonly tools = new Map<
+    string,
+    { execute: Handler; parameters?: Record<string, unknown> }
+  >();
   readonly renderers = new Map<string, unknown>();
   readonly flags = new Map<string, unknown>();
   readonly flagValues = new Map<string, unknown>();
@@ -150,7 +153,11 @@ class FakePi {
     this.commands.set(name, { handler: options.handler });
   }
 
-  registerTool(tool: { name: string; execute: Handler }): void {
+  registerTool(tool: {
+    name: string;
+    execute: Handler;
+    parameters?: Record<string, unknown>;
+  }): void {
     this.tools.set(tool.name, tool);
   }
 
@@ -544,6 +551,15 @@ test("registers the controller tool and grouped control command", async () => {
   await withExtension(async ({ pi, listeners, controlSends }) => {
     const tool = pi.tools.get("inter_agent_control");
     assert.ok(tool, "inter_agent_control tool not registered");
+    assert.equal(tool.parameters?.type, "object");
+    assert.deepEqual(
+      tool.parameters?.properties &&
+        (tool.parameters.properties as Record<string, { enum?: string[] }>)[
+          "command"
+        ]?.enum,
+      ["prompt", "steer", "follow_up", "abort", "state", "shutdown"],
+    );
+    assert.deepEqual(tool.parameters?.required, ["target", "command"]);
     const command = interAgentCommand(pi);
     pi.setFlagValue("allow-control-by", "leader");
     await runHandler(pi, "session_start", {}, pi.ctx);

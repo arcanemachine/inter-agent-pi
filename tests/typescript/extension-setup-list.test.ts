@@ -107,6 +107,17 @@ async function runHandlers(pi: FakePi, event: string): Promise<void> {
   }
 }
 
+async function withoutHelperOverride(fn: () => Promise<void>): Promise<void> {
+  const oldOverride = process.env.INTER_AGENT_PI_HELPER;
+  delete process.env.INTER_AGENT_PI_HELPER;
+  try {
+    await fn();
+  } finally {
+    if (oldOverride === undefined) delete process.env.INTER_AGENT_PI_HELPER;
+    else process.env.INTER_AGENT_PI_HELPER = oldOverride;
+  }
+}
+
 function command(pi: FakePi): { handler: Handler } {
   const registered = pi.commands.get("inter-agent");
   if (!registered) throw new Error("inter-agent command not registered");
@@ -418,15 +429,17 @@ test("connect recommends setup for a missing managed runtime", async () => {
   const home = mkdtempSync(join(tmpdir(), "ia-setup-connect-home-"));
   const cwd = mkdtempSync(join(tmpdir(), "ia-setup-connect-cwd-"));
   try {
-    await withExtension(home, cwd, async (pi) => {
-      await command(pi).handler("connect worker", pi.ctx);
-      const failure = pi.ctx.notifications.find(
-        (entry) => entry.type === "error",
-      );
-      assert.ok(failure);
-      assert.match(failure.message, /\/inter-agent setup/);
-      assert.doesNotMatch(failure.message, /\/inter-agent doctor/);
-    });
+    await withoutHelperOverride(() =>
+      withExtension(home, cwd, async (pi) => {
+        await command(pi).handler("connect worker", pi.ctx);
+        const failure = pi.ctx.notifications.find(
+          (entry) => entry.type === "error",
+        );
+        assert.ok(failure);
+        assert.match(failure.message, /\/inter-agent setup/);
+        assert.doesNotMatch(failure.message, /\/inter-agent doctor/);
+      }),
+    );
   } finally {
     rmSync(home, { recursive: true, force: true });
     rmSync(cwd, { recursive: true, force: true });
@@ -452,15 +465,17 @@ test("connect recommends setup for a broken managed shebang", async () => {
       writeFileSync(path, "#!/missing-python\nexit 0\n");
       chmodSync(path, 0o755);
     }
-    await withExtension(home, cwd, async (pi) => {
-      await command(pi).handler("connect worker", pi.ctx);
-      const failure = pi.ctx.notifications.find(
-        (entry) => entry.type === "error",
-      );
-      assert.ok(failure);
-      assert.match(failure.message, /\/inter-agent setup/);
-      assert.doesNotMatch(failure.message, /\/inter-agent doctor/);
-    });
+    await withoutHelperOverride(() =>
+      withExtension(home, cwd, async (pi) => {
+        await command(pi).handler("connect worker", pi.ctx);
+        const failure = pi.ctx.notifications.find(
+          (entry) => entry.type === "error",
+        );
+        assert.ok(failure);
+        assert.match(failure.message, /\/inter-agent setup/);
+        assert.doesNotMatch(failure.message, /\/inter-agent doctor/);
+      }),
+    );
   } finally {
     rmSync(home, { recursive: true, force: true });
     rmSync(cwd, { recursive: true, force: true });
@@ -477,16 +492,18 @@ test("connect recommends doctor for a partial PATH runtime", async () => {
     writeFileSync(path, "#!/bin/sh\nexit 0\n");
     chmodSync(path, 0o755);
     writeFileSync(join(pathDir, "inter-agent-connect"), "#!/bin/sh\nexit 0\n");
-    await withExtension(home, cwd, async (pi) => {
-      process.env.PATH = pathDir;
-      await command(pi).handler("connect worker", pi.ctx);
-      const failure = pi.ctx.notifications.find(
-        (entry) => entry.type === "error",
-      );
-      assert.ok(failure);
-      assert.match(failure.message, /\/inter-agent doctor/);
-      assert.doesNotMatch(failure.message, /\/inter-agent setup/);
-    });
+    await withoutHelperOverride(() =>
+      withExtension(home, cwd, async (pi) => {
+        process.env.PATH = pathDir;
+        await command(pi).handler("connect worker", pi.ctx);
+        const failure = pi.ctx.notifications.find(
+          (entry) => entry.type === "error",
+        );
+        assert.ok(failure);
+        assert.match(failure.message, /\/inter-agent doctor/);
+        assert.doesNotMatch(failure.message, /\/inter-agent setup/);
+      }),
+    );
   } finally {
     process.env.PATH = oldPath;
     rmSync(home, { recursive: true, force: true });

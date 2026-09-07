@@ -3114,41 +3114,22 @@ export default function (pi: ExtensionAPI) {
       description: "Deliberate replay request ID",
     }),
   );
-  const controlToolParameters = Type.Union([
-    Type.Object({
-      target: controlTarget,
-      command: Type.Literal("prompt"),
-      text: Type.String({ description: "Prompt text" }),
-      requestId: controlRequestId,
+  // Keep this schema flat for OpenAI-compatible providers that require every
+  // function parameter schema to have a top-level object type. Command/text
+  // relationships remain strictly validated by buildControlRequest().
+  const controlToolParameters = Type.Object({
+    target: controlTarget,
+    command: Type.String({
+      enum: ["prompt", "steer", "follow_up", "abort", "state", "shutdown"],
+      description: "Control command",
     }),
-    Type.Object({
-      target: controlTarget,
-      command: Type.Literal("steer"),
-      text: Type.String({ description: "Steering text" }),
-      requestId: controlRequestId,
-    }),
-    Type.Object({
-      target: controlTarget,
-      command: Type.Literal("follow_up"),
-      text: Type.String({ description: "Follow-up text" }),
-      requestId: controlRequestId,
-    }),
-    Type.Object({
-      target: controlTarget,
-      command: Type.Literal("abort"),
-      requestId: controlRequestId,
-    }),
-    Type.Object({
-      target: controlTarget,
-      command: Type.Literal("state"),
-      requestId: controlRequestId,
-    }),
-    Type.Object({
-      target: controlTarget,
-      command: Type.Literal("shutdown"),
-      requestId: controlRequestId,
-    }),
-  ]);
+    text: Type.Optional(
+      Type.String({
+        description: "Prompt, steering, or follow-up text",
+      }),
+    ),
+    requestId: controlRequestId,
+  });
 
   pi.registerTool({
     name: "inter_agent_control",
