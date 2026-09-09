@@ -1007,6 +1007,41 @@ test("queued user notification is metadata-only while immediate shows the bounde
   );
 });
 
+test("explicit connect notifies before server readiness resolves", async () => {
+  await withEnv(
+    { project: { projectPaths: [process.cwd()], deliveryMode: "queued" } },
+    async ({ pi }) => {
+      const cmd = interAgentCommand(pi);
+      const pending = cmd.handler("connect rx --label worker", pi.ctx);
+
+      assert.deepEqual(pi.notifyLog, [
+        {
+          message:
+            '[inter-agent] connecting: to inter-agent message bus as "rx" (worker)',
+          type: "info",
+        },
+      ]);
+
+      await pending;
+      assert.equal(pi.notifyLog.length, 1);
+    },
+  );
+});
+
+test("invalid connect usage does not show progress", async () => {
+  await withEnv(
+    { project: { projectPaths: [process.cwd()], deliveryMode: "queued" } },
+    async ({ pi }) => {
+      const cmd = interAgentCommand(pi);
+      await cmd.handler("connect rx one two", pi.ctx);
+
+      assert.equal(pi.notifyLog.length, 1);
+      assert.equal(pi.notifyLog[0]?.type, "error");
+      assert.ok(!pi.notifyLog[0]?.message.includes("connecting"));
+    },
+  );
+});
+
 test("connection transitions notify the model without triggering a turn", async () => {
   await withEnv(
     { project: { projectPaths: [process.cwd()], deliveryMode: "queued" } },
@@ -1032,7 +1067,13 @@ test("connection transitions notify the model without triggering a turn", async 
         triggerTurn: false,
         deliverAs: "followUp",
       });
-      assert.deepEqual(pi.notifyLog, []);
+      assert.deepEqual(pi.notifyLog, [
+        {
+          message:
+            '[inter-agent] connecting: to inter-agent message bus as "rx"',
+          type: "info",
+        },
+      ]);
 
       await cmd.handler("disconnect", pi.ctx);
       const statuses = connectionStatuses(pi);
@@ -1049,12 +1090,24 @@ test("connection transitions notify the model without triggering a turn", async 
         triggerTurn: false,
         deliverAs: "followUp",
       });
-      assert.deepEqual(pi.notifyLog, []);
+      assert.deepEqual(pi.notifyLog, [
+        {
+          message:
+            '[inter-agent] connecting: to inter-agent message bus as "rx"',
+          type: "info",
+        },
+      ]);
 
       // Repeating disconnect while already disconnected keeps the model quiet.
       await cmd.handler("disconnect", pi.ctx);
       assert.equal(connectionStatuses(pi).length, 2);
-      assert.deepEqual(pi.notifyLog, []);
+      assert.deepEqual(pi.notifyLog, [
+        {
+          message:
+            '[inter-agent] connecting: to inter-agent message bus as "rx"',
+          type: "info",
+        },
+      ]);
     },
   );
 });
@@ -1084,7 +1137,18 @@ test("replacing a listener emits one completed connection status", async () => {
         statuses[1].message.content,
         'Connected to inter-agent message bus as "b".',
       );
-      assert.deepEqual(pi.notifyLog, []);
+      assert.deepEqual(pi.notifyLog, [
+        {
+          message:
+            '[inter-agent] connecting: to inter-agent message bus as "a"',
+          type: "info",
+        },
+        {
+          message:
+            '[inter-agent] connecting: to inter-agent message bus as "b"',
+          type: "info",
+        },
+      ]);
     },
   );
 });

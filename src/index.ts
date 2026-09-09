@@ -2472,6 +2472,11 @@ export default function (pi: ExtensionAPI) {
       return;
     }
 
+    notify(
+      "[inter-agent] connecting",
+      `to inter-agent message bus as "${parsed.name}"${parsed.label ? ` (${parsed.label})` : ""}`,
+    );
+
     const ready = await ensureServerAvailable(
       currentScripts(),
       notifyCommandFailure,

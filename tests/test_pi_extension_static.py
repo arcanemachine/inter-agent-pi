@@ -201,6 +201,22 @@ def test_pi_extension_connect_and_rename_await_start_listener() -> None:
     assert "await startListener(pi, ctx, config, parsed.name, label," in rename_body
 
 
+def test_pi_extension_explicit_connect_shows_progress_before_readiness() -> None:
+    content = PI_EXTENSION.read_text(encoding="utf-8")
+    connect_body = content.split("async function handleConnect", 1)[1]
+    connect_body = connect_body.split("async function handleDisconnect", 1)[0]
+
+    assert '"[inter-agent] connecting",\n' in connect_body
+    assert (
+        '      `to inter-agent message bus as "'
+        '${parsed.name}"${parsed.label ? ` (${parsed.label})` : ""}`,'
+    ) in connect_body
+    assert connect_body.index('"[inter-agent] connecting"') < connect_body.index(
+        "await ensureServerAvailable("
+    )
+    assert "notifyOnReady: true" in connect_body
+
+
 def test_pi_extension_notifies_when_server_connection_closes() -> None:
     content = PI_EXTENSION.read_text(encoding="utf-8")
 
