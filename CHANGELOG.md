@@ -7,6 +7,10 @@ the split-generation source extracted from the coordinated monorepo
 
 ## Unreleased
 
+No unreleased changes.
+
+## 0.4.0 — Managed setup, control compatibility, and connection UX
+
 - Add explicit `/inter-agent setup` for approval-gated managed Python helper
   creation and guarded repair using standard `python3 -m venv` and the
   environment's `python -m pip`; setup accepts the compatible helper range
@@ -36,6 +40,12 @@ the split-generation source extracted from the coordinated monorepo
   contains the list; the first complete helper checkout is selected. Malformed
   lists, missing candidates, and the former key fail closed with migration
   guidance.
+- Flatten the `inter_agent_control` tool schema to a top-level object for
+  compatibility with OpenAI-compatible providers while retaining strict
+  semantic validation.
+- Show one immediate ephemeral `connecting` notification for each valid
+  explicit `/inter-agent connect` command before server readiness is checked.
+  Startup-flag connections, restored reconnects, and rename remain unchanged.
 
 ## 0.3.4
 
