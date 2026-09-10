@@ -20,9 +20,10 @@ import type {
   ContextEvent,
   ExtensionAPI,
   ExtensionContext,
+  Theme,
 } from "@earendil-works/pi-coding-agent";
 import type { AutocompleteItem, Component } from "@earendil-works/pi-tui";
-import { Box, Spacer, Text } from "@earendil-works/pi-tui";
+import { Box, Container, Spacer, Text } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 import { spawn, ChildProcess } from "node:child_process";
 
@@ -784,6 +785,36 @@ function messageSummary(details: {
     return `from ${details.from} • ${chars} chars`;
   }
   return null;
+}
+
+function renderOutgoingToolCall(toolName: string, theme: Theme): Component {
+  return new Text(theme.fg("toolTitle", theme.bold(toolName)), 0, 0);
+}
+
+function renderOutgoingToolResult(
+  toolName: string,
+  result: { content: ReadonlyArray<{ type: string; text?: string }> },
+  expanded: boolean,
+  isPartial: boolean,
+  isError: boolean,
+  destination: string,
+  message: string,
+  theme: Theme,
+): Component {
+  if (isError) {
+    const errorText = result.content
+      .filter((block) => block.type === "text")
+      .map((block) => block.text ?? "")
+      .filter(Boolean)
+      .join("\n");
+    return new Text(theme.fg("error", errorText || `${toolName} failed`), 0, 0);
+  }
+  if (!expanded || isPartial) return new Container();
+  return new Text(
+    theme.fg("toolOutput", `\nTo: ${destination}\n\nMessage: ${message}`),
+    0,
+    0,
+  );
 }
 
 function getConnectionState(ctx: ExtensionContext): ConnectionState | null {
@@ -3200,6 +3231,21 @@ export default function (pi: ExtensionAPI) {
         details: { to, text },
       };
     },
+    renderCall(_args, theme) {
+      return renderOutgoingToolCall("inter_agent_send", theme);
+    },
+    renderResult(result, { expanded, isPartial }, theme, context) {
+      return renderOutgoingToolResult(
+        "inter_agent_send",
+        result,
+        expanded,
+        isPartial,
+        context.isError,
+        context.args.to,
+        context.args.text,
+        theme,
+      );
+    },
   });
 
   pi.registerTool({
@@ -3235,6 +3281,21 @@ export default function (pi: ExtensionAPI) {
         ],
         details: { text },
       };
+    },
+    renderCall(_args, theme) {
+      return renderOutgoingToolCall("inter_agent_broadcast", theme);
+    },
+    renderResult(result, { expanded, isPartial }, theme, context) {
+      return renderOutgoingToolResult(
+        "inter_agent_broadcast",
+        result,
+        expanded,
+        isPartial,
+        context.isError,
+        "everyone",
+        context.args.text,
+        theme,
+      );
     },
   });
 

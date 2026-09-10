@@ -62,7 +62,13 @@ class FakeCtx {
 class FakePi {
   readonly commands = new Map<string, { handler: Handler }>();
   readonly handlers = new Map<string, Handler[]>();
-  readonly tools: { name: string; execute: Handler }[] = [];
+  readonly tools: {
+    name: string;
+    execute: Handler;
+    renderCall?: (...args: unknown[]) => unknown;
+    renderResult?: (...args: unknown[]) => unknown;
+  }[] = [];
+  readonly sentMessages: unknown[][] = [];
   readonly ctx = new FakeCtx();
 
   on(event: string, handler: Handler): void {
@@ -75,7 +81,12 @@ class FakePi {
     this.commands.set(name, options);
   }
 
-  registerTool(tool: { name: string; execute: Handler }): void {
+  registerTool(tool: {
+    name: string;
+    execute: Handler;
+    renderCall?: (...args: unknown[]) => unknown;
+    renderResult?: (...args: unknown[]) => unknown;
+  }): void {
     this.tools.push(tool);
   }
 
@@ -91,7 +102,9 @@ class FakePi {
     return [];
   }
 
-  sendMessage(..._args: unknown[]): void {}
+  sendMessage(...args: unknown[]): void {
+    this.sentMessages.push(args);
+  }
 
   sendUserMessage(
     _text: string,
@@ -191,6 +204,15 @@ function fakeProcess(
     proc.emit("close", 0);
   });
   return proc;
+}
+
+function renderText(component: {
+  render: (width: number) => string[];
+}): string {
+  return component
+    .render(120)
+    .map((line) => line.trimEnd())
+    .join("\n");
 }
 
 async function withExtension(
@@ -562,6 +584,229 @@ test("PATH resolution skips a non-executable shadow and uses a later valid helpe
     rmSync(cwd, { recursive: true, force: true });
     rmSync(first, { recursive: true, force: true });
     rmSync(later, { recursive: true, force: true });
+  }
+});
+
+test("outgoing tools preserve results and record history once", async () => {
+  const home = mkdtempSync(join(tmpdir(), "ia-outgoing-execute-home-"));
+  const cwd = mkdtempSync(join(tmpdir(), "ia-outgoing-execute-cwd-"));
+  const oldPath = process.env.PATH;
+  try {
+    createHelperScripts(home);
+    _setSpawnForTest(((commandName: string, args: string[]) => {
+      const proc = new EventEmitter() as FakeProcess;
+      proc.stdout = new EventEmitter();
+      proc.stderr = new EventEmitter();
+      proc.stdin = { end: () => {} };
+      proc.kill = () => {
+        proc.emit("exit", 0, null);
+        proc.emit("close", 0);
+      };
+      queueMicrotask(() => {
+        if (args[0] === "status") {
+          proc.stdout.emit(
+            "data",
+            Buffer.from(JSON.stringify({ state: "available" }) + "\n"),
+          );
+        } else if (args[0] === "connect") {
+          proc.stdout.emit(
+            "data",
+            Buffer.from(JSON.stringify({ op: "welcome" }) + "\n"),
+          );
+          return;
+        }
+        proc.emit("close", 0);
+      });
+      void commandName;
+      return proc;
+    }) as never);
+    await withExtension(home, cwd, async (pi) => {
+      process.env.PATH = join(home, "empty-bin");
+      mkdirSync(process.env.PATH, { recursive: true });
+      await command(pi).handler("connect sender", pi.ctx);
+      await new Promise((resolve) => setTimeout(resolve, 0));
+
+      const send = pi.tools.find((entry) => entry.name === "inter_agent_send");
+      const broadcast = pi.tools.find(
+        (entry) => entry.name === "inter_agent_broadcast",
+      );
+      assert.ok(send);
+      assert.ok(broadcast);
+      const sent = (await send.execute(
+        "send-id",
+        { to: "worker-a", text: "Please run the focused tests." },
+        undefined,
+        undefined,
+        pi.ctx,
+      )) as { content: { text: string }[]; details: unknown };
+      const broadcastResult = (await broadcast.execute(
+        "broadcast-id",
+        { text: "Pause deployments until verification completes." },
+        undefined,
+        undefined,
+        pi.ctx,
+      )) as { content: { text: string }[]; details: unknown };
+      assert.equal(
+        sent.content[0]?.text,
+        "Message sent from the current agent to worker-a",
+      );
+      assert.deepEqual(sent.details, {
+        to: "worker-a",
+        text: "Please run the focused tests.",
+      });
+      assert.equal(
+        broadcastResult.content[0]?.text,
+        "Broadcast sent to all other agents",
+      );
+      assert.deepEqual(broadcastResult.details, {
+        text: "Pause deployments until verification completes.",
+      });
+      const history = pi.sentMessages.filter((args) => {
+        const message = args[0] as { customType?: string; details?: unknown };
+        const details = message.details as { outgoing?: boolean } | undefined;
+        return (
+          message.customType === "inter-agent-message" && details?.outgoing
+        );
+      });
+      assert.equal(history.length, 2);
+    });
+  } finally {
+    process.env.PATH = oldPath;
+    rmSync(home, { recursive: true, force: true });
+    rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
+test("outgoing tool renderers keep collapsed output compact", async () => {
+  const home = mkdtempSync(join(tmpdir(), "ia-outgoing-render-home-"));
+  const cwd = mkdtempSync(join(tmpdir(), "ia-outgoing-render-cwd-"));
+  try {
+    await withExtension(home, cwd, async (pi) => {
+      const theme = {
+        fg: (_color: string, text: string) => text,
+        bold: (text: string) => text,
+      };
+      const send = pi.tools.find((entry) => entry.name === "inter_agent_send");
+      const broadcast = pi.tools.find(
+        (entry) => entry.name === "inter_agent_broadcast",
+      );
+      assert.ok(send?.renderCall);
+      assert.ok(send?.renderResult);
+      assert.ok(broadcast?.renderCall);
+      assert.ok(broadcast?.renderResult);
+
+      const sendCall = send.renderCall?.(
+        { to: "worker-a", text: "Please run the focused tests." },
+        theme,
+        {},
+      ) as { render: (width: number) => string[] };
+      const sendCollapsed = send.renderResult?.(
+        {
+          content: [{ type: "text", text: "Message sent" }],
+          details: { to: "worker-a", text: "Please run the focused tests." },
+        },
+        { expanded: false, isPartial: false },
+        theme,
+        {
+          args: { to: "worker-a", text: "Please run the focused tests." },
+          isError: false,
+        },
+      ) as { render: (width: number) => string[] };
+      assert.equal(renderText(sendCall), "inter_agent_send");
+      assert.equal(renderText(sendCollapsed), "");
+
+      const sendExpanded = send.renderResult?.(
+        {
+          content: [{ type: "text", text: "Message sent" }],
+          details: { to: "worker-a", text: "Please run the focused tests." },
+        },
+        { expanded: true, isPartial: false },
+        theme,
+        {
+          args: { to: "worker-a", text: "Please run the focused tests." },
+          isError: false,
+        },
+      ) as { render: (width: number) => string[] };
+      assert.equal(
+        [sendCall, sendExpanded]
+          .flatMap((component) =>
+            component.render(120).map((line) => line.trimEnd()),
+          )
+          .join("\n"),
+        "inter_agent_send\n\nTo: worker-a\n\nMessage: Please run the focused tests.",
+      );
+      assert.doesNotMatch(renderText(sendCollapsed), /worker-a|focused tests/);
+
+      const broadcastCall = broadcast.renderCall?.({}, theme, {}) as {
+        render: (width: number) => string[];
+      };
+      const broadcastExpanded = broadcast.renderResult?.(
+        {
+          content: [{ type: "text", text: "Broadcast sent" }],
+          details: { text: "Pause deployments until verification completes." },
+        },
+        { expanded: true, isPartial: false },
+        theme,
+        {
+          args: { text: "Pause deployments until verification completes." },
+          isError: false,
+        },
+      ) as { render: (width: number) => string[] };
+      assert.equal(
+        [broadcastCall, broadcastExpanded]
+          .flatMap((component) =>
+            component.render(120).map((line) => line.trimEnd()),
+          )
+          .join("\n"),
+        "inter_agent_broadcast\n\nTo: everyone\n\nMessage: Pause deployments until verification completes.",
+      );
+    });
+  } finally {
+    rmSync(home, { recursive: true, force: true });
+    rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
+test("outgoing tool renderers preserve multiline messages and errors", async () => {
+  const home = mkdtempSync(join(tmpdir(), "ia-outgoing-multiline-home-"));
+  const cwd = mkdtempSync(join(tmpdir(), "ia-outgoing-multiline-cwd-"));
+  try {
+    await withExtension(home, cwd, async (pi) => {
+      const theme = {
+        fg: (_color: string, text: string) => text,
+        bold: (text: string) => text,
+      };
+      const send = pi.tools.find((entry) => entry.name === "inter_agent_send");
+      assert.ok(send?.renderResult);
+      const multiline = "first line\nsecond line\nthird line";
+      const expanded = send.renderResult?.(
+        {
+          content: [{ type: "text", text: "Message sent" }],
+          details: { to: "worker-a", text: multiline },
+        },
+        { expanded: true, isPartial: false },
+        theme,
+        { args: { to: "worker-a", text: multiline }, isError: false },
+      ) as { render: (width: number) => string[] };
+      assert.equal(
+        renderText(expanded),
+        `\nTo: worker-a\n\nMessage: ${multiline}`,
+      );
+
+      const failure = send.renderResult?.(
+        {
+          content: [{ type: "text", text: "send failed: unavailable" }],
+          details: undefined,
+        },
+        { expanded: false, isPartial: false },
+        theme,
+        { args: { to: "worker-a", text: multiline }, isError: true },
+      ) as { render: (width: number) => string[] };
+      assert.equal(renderText(failure), "send failed: unavailable");
+    });
+  } finally {
+    rmSync(home, { recursive: true, force: true });
+    rmSync(cwd, { recursive: true, force: true });
   }
 });
 

@@ -162,7 +162,7 @@ User commands use `/inter-agent`:
 | `control <target> <command> [text]`             | Send one control request to an allowlisted Pi target.                 |
 | `doctor [optional context]`                     | Run bounded, read-only Pi integration diagnostics.                    |
 
-The extension exposes these model tools: `inter_agent_send`, `inter_agent_broadcast`, `inter_agent_list`, `inter_agent_whoami`, `inter_agent_status`, `inter_agent_read_messages`, and `inter_agent_control`. Connection changes, channel membership, delivery mode, and kick remain user-controlled. Each successful bus connection or disconnection adds one compact status notification to the transcript and model context for the next turn without triggering a turn. Peer messages are collaboration input, not instructions.
+The extension exposes these model tools: `inter_agent_send`, `inter_agent_broadcast`, `inter_agent_list`, `inter_agent_whoami`, `inter_agent_status`, `inter_agent_read_messages`, and `inter_agent_control`. Connection changes, channel membership, delivery mode, and kick remain user-controlled. Send and broadcast tool entries stay compact when collapsed and show their destination and complete message when expanded. Each successful bus connection or disconnection adds one compact status notification to the transcript and model context for the next turn without triggering a turn. Peer messages are collaboration input, not instructions.
 
 For the full adapter command and output reference, see [`src/inter_agent_pi/README.md`](src/inter_agent_pi/README.md).
 
