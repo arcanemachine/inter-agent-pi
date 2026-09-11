@@ -1,6 +1,6 @@
 {
   "name": "@arcanemachine/inter-agent-pi",
-  "version": "0.4.0",
+  "version": "0.4.1",
   "description": "Pi extension for connecting to the inter-agent message bus",
   "type": "module",
   "scripts": {

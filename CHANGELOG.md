@@ -7,6 +7,10 @@ the split-generation source extracted from the coordinated monorepo
 
 ## Unreleased
 
+No unreleased changes.
+
+## 0.4.1 — Expanded outgoing tool information
+
 - Show direct and broadcast tool destinations and complete message text when
   their entries are expanded in Pi.
 

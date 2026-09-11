@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import io
 import json
+import os
 import subprocess
 import sys
 from collections.abc import Callable
@@ -24,6 +25,12 @@ from inter_agent_pi.cli import main as pi_main
 from inter_agent_pi.listener import run_listener
 
 ROOT = Path(__file__).resolve().parents[2]
+
+
+def node_test_environment() -> dict[str, str]:
+    env = os.environ.copy()
+    env.pop("BASH_ENV", None)
+    return env
 
 
 @dataclass(frozen=True)
@@ -570,7 +577,15 @@ async def test_pi_listener_reapplies_subscriptions_after_server_restart(
             await server_task
 
 
-PI_EXTENSION_HARNESS = r"""const path = require("path");
+PI_EXTENSION_HARNESS = r"""const fs = require("fs");
+const os = require("os");
+const path = require("path");
+
+const isolatedHome = fs.mkdtempSync(
+  path.join(os.tmpdir(), "inter-agent-pi-test-home-"),
+);
+process.env.HOME = isolatedHome;
+delete process.env.INTER_AGENT_CONFIG;
 
 const extensionPath = path.resolve(process.argv[2]);
 const helperPath = process.argv[3];
@@ -623,14 +638,18 @@ const ext = require(extensionPath);
 ext.default(fakeApi);
 
 async function main() {
-  process.env.INTER_AGENT_PI_HELPER = helperPath;
+  try {
+    process.env.INTER_AGENT_PI_HELPER = helperPath;
 
-  for (const fn of eventHandlers["session_start"] || []) {
-    await fn({}, fakeCtx);
+    for (const fn of eventHandlers["session_start"] || []) {
+      await fn({}, fakeCtx);
+    }
+
+    await handlers["inter-agent"]("list", fakeCtx);
+    console.log(JSON.stringify(notifications));
+  } finally {
+    fs.rmSync(isolatedHome, { force: true, recursive: true });
   }
-
-  await handlers["inter-agent"]("list", fakeCtx);
-  console.log(JSON.stringify(notifications));
 }
 
 main().catch((e) => {
@@ -668,6 +687,7 @@ async def test_pi_extension_list_command_before_connect_reports_empty_sessions(
         capture_output=True,
         text=True,
         check=True,
+        env=node_test_environment(),
     )
     notifications = json.loads(result.stdout)
     assert notifications == [{"body": "[inter-agent] list: no agents connected", "type": "info"}]
@@ -719,6 +739,7 @@ async def test_pi_extension_list_command_rejects_malformed_helper_response(
         capture_output=True,
         text=True,
         check=True,
+        env=node_test_environment(),
     )
     notifications = json.loads(result.stdout)
     assert notifications == [
