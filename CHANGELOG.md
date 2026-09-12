@@ -7,6 +7,10 @@ the split-generation source extracted from the coordinated monorepo
 
 ## Unreleased
 
+No unreleased changes.
+
+## 0.5.0 — Mailbox flush command
+
 - Add `/inter-agent flush [count]` to move unread mailbox messages into context
   as one batch with a single triggered turn. With no count it flushes every
   unread message; with a count it flushes the oldest messages up to the mailbox

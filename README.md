@@ -26,7 +26,7 @@ Use this canonical setup for a released installation:
 1. Install the released Pi extension:
 
    ```text
-   pi install npm:@arcanemachine/inter-agent-pi@0.4.0
+   pi install npm:@arcanemachine/inter-agent-pi@0.5.0
    ```
 
 2. Open Pi and run `/inter-agent setup`. Review the managed destination and
@@ -34,7 +34,7 @@ Use this canonical setup for a released installation:
    `python3 -m venv` and the environment's `python -m pip`; end users do not
    need `uv`, global pip, `sudo`, or a system package manager.
 
-The npm extension and Python helper are published separately. Extension `0.4.0`
+The npm extension and Python helper are published separately. Extension `0.5.0`
 uses the compatible helper line `inter-agent-pi~=0.3.1` (`>=0.3.1,<0.4.0`),
 so patch releases in the `0.3` line are accepted while `0.4` is excluded. The
 helper installs its compatible `inter-agent-core` runtime automatically.
