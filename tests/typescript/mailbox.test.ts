@@ -1591,3 +1591,148 @@ test("malformed-carrier seq/arrival consistency fails closed while valid empty/e
     assert.ok(!all.includes("m-10")); // oldest restored was evicted, not resurrected
   }
 });
+
+// ── Non-destructive selection ───────────────────────────────────────────────
+
+test("selectUnread returns copies of unread entries in arrival order without removing them", () => {
+  const host = new FakeHost();
+  const mailbox = makeDispatcher(host, "queued", 0);
+  mailbox.deliverInbound(
+    queuedDispatch("a", "body-a", "alice", "direct", undefined, "me"),
+  );
+  mailbox.deliverInbound(queuedDispatch("b", "body-b", "bob", "broadcast"));
+  mailbox.deliverInbound(
+    queuedDispatch("c", "body-c", "carol", "channel", "ops"),
+  );
+
+  const selected = mailbox.selectUnread();
+  assert.deepEqual(
+    selected.map((entry) => entry.msgId),
+    ["a", "b", "c"],
+  );
+  assert.deepEqual(
+    selected.map((entry) => entry.body),
+    ["body-a", "body-b", "body-c"],
+  );
+  assert.deepEqual(
+    selected.map((entry) => entry.sender),
+    ["alice", "bob", "carol"],
+  );
+  assert.deepEqual(
+    selected.map((entry) => entry.kind),
+    ["direct", "broadcast", "channel"],
+  );
+  assert.deepEqual(
+    selected.map((entry) => entry.channel),
+    [undefined, undefined, "ops"],
+  );
+  assert.deepEqual(
+    selected.map((entry) => entry.target),
+    ["me", undefined, undefined],
+  );
+  assert.deepEqual(
+    selected.map((entry) => entry.arrival),
+    [0, 1, 2],
+  );
+
+  // Selection returns copies: mutating them leaves mailbox state untouched.
+  selected[0].body = "mutated";
+  selected[0].msgId = "mutated";
+  const again = mailbox.selectUnread();
+  assert.deepEqual(
+    again.map((entry) => [entry.msgId, entry.body]),
+    [
+      ["a", "body-a"],
+      ["b", "body-b"],
+      ["c", "body-c"],
+    ],
+  );
+  assert.equal(mailbox.size, 3);
+});
+
+test("selectUnread count selects the oldest entries and clamps at the unread total", () => {
+  const host = new FakeHost();
+  const mailbox = makeDispatcher(host, "queued", 0);
+  mailbox.deliverInbound(queuedDispatch("a", "body-a", "alice"));
+  mailbox.deliverInbound(queuedDispatch("b", "body-b", "bob"));
+  mailbox.deliverInbound(queuedDispatch("c", "body-c", "carol"));
+
+  assert.deepEqual(
+    mailbox.selectUnread(1).map((entry) => entry.msgId),
+    ["a"],
+  );
+  assert.deepEqual(
+    mailbox.selectUnread(2).map((entry) => entry.msgId),
+    ["a", "b"],
+  );
+  assert.deepEqual(
+    mailbox.selectUnread(99).map((entry) => entry.msgId),
+    ["a", "b", "c"],
+  );
+  // Nothing was removed by any selection.
+  assert.equal(mailbox.size, 3);
+});
+
+test("selectUnread returns nothing for non-positive or non-integer counts", () => {
+  const host = new FakeHost();
+  const mailbox = makeDispatcher(host, "queued", 0);
+  mailbox.deliverInbound(queuedDispatch("a", "body-a", "alice"));
+
+  for (const count of [0, -1, 1.5, Number.NaN, Number.POSITIVE_INFINITY]) {
+    assert.deepEqual(mailbox.selectUnread(count), [], `count ${count}`);
+  }
+  assert.equal(mailbox.size, 1);
+});
+
+test("selectUnread accepts the mailbox capacity as a count", () => {
+  const host = new FakeHost();
+  const mailbox = makeDispatcher(host, "queued", 0);
+  for (let i = 0; i < MAILBOX_MAX_UNREAD; i++) {
+    mailbox.deliverInbound(queuedDispatch(`m-${i}`, `body-${i}`, "alice"));
+  }
+
+  assert.equal(
+    mailbox.selectUnread(MAILBOX_MAX_UNREAD).length,
+    MAILBOX_MAX_UNREAD,
+  );
+  assert.equal(mailbox.size, MAILBOX_MAX_UNREAD);
+});
+
+test("pending notices rebuild from the unread set left by partial and full removal", () => {
+  const host = new FakeHost();
+  const mailbox = makeDispatcher(host, "queued", 0);
+  host.idle = false;
+  host.pendingMessages = true;
+  for (const id of ["m1", "m2", "m3"]) {
+    mailbox.deliverInbound(queuedDispatch(id, `body-${id}`, "alice"));
+  }
+  // While the agent is busy the notice stays pending rather than emitting.
+  host.firePending();
+  assert.equal(host.notices.length, 0);
+
+  // A partial removal leaves the newer entries in the settled notice.
+  const partial = mailbox.read(["m1"]);
+  assert.equal(partial.remaining, 2);
+  host.idle = true;
+  host.pendingMessages = false;
+  mailbox.settle();
+  assert.equal(host.notices.length, 1);
+  assert.equal(host.notices[0].triggerTurn, true);
+  assert.deepEqual(
+    host.notices[0].message.details.messages.map((entry) => entry.id),
+    ["m2", "m3"],
+  );
+
+  // A full removal empties the mailbox, so a later pending notice emits nothing.
+  const full = mailbox.read();
+  assert.equal(full.remaining, 0);
+  host.idle = false;
+  host.pendingMessages = true;
+  mailbox.deliverInbound(queuedDispatch("m4", "body-m4", "alice"));
+  host.firePending();
+  mailbox.read();
+  host.idle = true;
+  host.pendingMessages = false;
+  mailbox.settle();
+  assert.equal(host.notices.length, 1);
+});

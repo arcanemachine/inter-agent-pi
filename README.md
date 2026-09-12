@@ -109,6 +109,8 @@ In the second session:
 
 The first session receives a Pi notification. The default delivery mode is queued: Pi shows a metadata-only notice, and the model reads and removes bodies with `inter_agent_read_messages`. Use `/inter-agent delivery immediate` when bounded message bodies should appear directly in notifications.
 
+A queued session can also move unread bodies into context itself with `/inter-agent flush [count]`. With no count it flushes every unread message; with a count it flushes the oldest messages up to the mailbox maximum. The complete selected batch enters context at once and triggers one turn, and flushed messages stop being unread. An empty mailbox reports that there is nothing to flush without touching context, and `inter_agent_read_messages` remains available for model-directed or exact-ID reads.
+
 The core server starts automatically when no healthy server is available. To connect at process startup, use `pi --inter-agent pi-a`.
 
 ### Read-only doctor (primary troubleshooting path)
@@ -159,6 +161,7 @@ User commands use `/inter-agent`:
 | `publish <channel> <text>` / `channels`         | Publish to or inspect a channel.                                      |
 | `kick <name>`                                   | Disconnect another session.                                           |
 | `delivery <queued\|immediate>`                  | Select inbound delivery mode.                                         |
+| `flush [count]`                                 | Move unread mailbox messages into context (all, or the oldest count). |
 | `control <target> <command> [text]`             | Send one control request to an allowlisted Pi target.                 |
 | `doctor [optional context]`                     | Run bounded, read-only Pi integration diagnostics.                    |
 
@@ -271,6 +274,8 @@ ordinary tmux remain the baseline.
 ## Connection and mailbox behavior
 
 The default mailbox is queued and capped at 128 unread messages. A same-process `/reload` preserves unread messages; an explicit disconnect or process restart begins with an empty mailbox. Transient listener failures use bounded reconnect attempts and restore desired channel subscriptions. Authentication, invalid-name, name-conflict, and kick failures require user action. `/inter-agent list` sorts connected routing names alphabetically and renders one client per line; labels are display metadata and do not affect ordering.
+
+`/inter-agent flush [count]` moves unread mailbox bodies into context without asking the model to call `inter_agent_read_messages`. It keeps each message's body, sender, and destination metadata, entering the selected messages in arrival order and triggering exactly one turn for the batch. A count must be a positive integer no larger than the mailbox capacity; a count smaller than the unread total flushes the oldest messages and leaves the rest unread. An empty mailbox shows that there is nothing to flush and adds no context entry or turn. `/inter-agent flush` is a user command and does not require an active bus connection, so it can move messages retained after a listener disconnect.
 
 The default bus endpoint is `127.0.0.1:16837`. Local sessions share endpoint, state, and secret discovery through `inter-agent-core`. Loopback transport defaults to plaintext WebSockets; configured or non-loopback deployments can use TLS. TLS failures never fall back automatically to plaintext.
 

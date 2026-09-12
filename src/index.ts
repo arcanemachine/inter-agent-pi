@@ -19,6 +19,7 @@
 import type {
   ContextEvent,
   ExtensionAPI,
+  ExtensionCommandContext,
   ExtensionContext,
   Theme,
 } from "@earendil-works/pi-coding-agent";
@@ -90,6 +91,7 @@ import {
   buildNoticeExpanded,
   createProcessGlobalHandoffCarrier,
   deriveInboundMetadata,
+  describeDestination,
   effectiveDeliveryMode,
   effectiveDebounceMs,
   isValidDebounceMs,
@@ -2490,6 +2492,12 @@ export default function (pi: ExtensionAPI) {
         "Set [i]mmediate or [q]ueued (via mailbox) message delivery <immediate|queued>",
     },
     {
+      value: "flush",
+      label: "flush",
+      description:
+        "Move unread mailbox messages into context (all, or the oldest <count>)",
+    },
+    {
       value: "control",
       label: "control",
       description: "Control an allowlisted Pi target",
@@ -2900,6 +2908,82 @@ export default function (pi: ExtensionAPI) {
     );
   }
 
+  const FLUSH_USAGE = "usage: /inter-agent flush [count]";
+
+  /**
+   * Parse the optional flush count. Returns null for invalid input; an object
+   * with an undefined `count` means "every unread message".
+   */
+  function parseFlushCount(args: string): { count?: number } | null {
+    if (!args) return {};
+    const parts = args.split(/\s+/);
+    if (parts.length !== 1) return null;
+    if (!/^\d+$/.test(parts[0])) return null;
+    const count = Number(parts[0]);
+    if (
+      !Number.isSafeInteger(count) ||
+      count < 1 ||
+      count > MAILBOX_MAX_UNREAD
+    ) {
+      return null;
+    }
+    return { count };
+  }
+
+  async function handleFlush(args: string, ctx: ExtensionCommandContext) {
+    const parsed = parseFlushCount(args.trim());
+    if (parsed === null) {
+      notify("[inter-agent] flush failed", FLUSH_USAGE, "error");
+      return;
+    }
+    // Wait before selecting so an argument-free flush moves the unread set that
+    // exists once the command reaches its idle execution point.
+    await ctx.waitForIdle();
+    const selected = mailbox.selectUnread(parsed.count);
+    if (selected.length === 0) {
+      notify(
+        "[inter-agent] flush",
+        "This session's inter-agent mailbox is empty, so there are no messages to flush.",
+      );
+      return;
+    }
+    try {
+      // Earlier entries enter context without triggering; only the final entry
+      // starts the turn, so the complete batch is present before that turn.
+      for (let index = 0; index < selected.length; index += 1) {
+        const entry = selected[index];
+        pi.sendMessage(
+          buildInboundMessage(
+            entry.sender,
+            entry.body,
+            describeDestination(entry.channel, entry.target),
+          ),
+          { triggerTurn: index === selected.length - 1 },
+        );
+      }
+    } catch {
+      notify(
+        "[inter-agent] flush failed",
+        "could not add the selected messages to context; they remain unread",
+        "error",
+      );
+      return;
+    }
+    const removal = mailbox.read(selected.map((entry) => entry.msgId));
+    if (removal.missing.length > 0 || removal.read.length !== selected.length) {
+      notify(
+        "[inter-agent] flush failed",
+        "the injected messages could not be removed from the unread mailbox",
+        "error",
+      );
+      return;
+    }
+    notify(
+      "[inter-agent] flush",
+      `${selected.length} message(s) flushed to context; ${removal.remaining} unread remaining`,
+    );
+  }
+
   async function handleSetup(args: string, ctx: ExtensionContext) {
     if (args.trim()) {
       notify(
@@ -3061,7 +3145,7 @@ export default function (pi: ExtensionAPI) {
   function showInterAgentUsage() {
     notify(
       "[inter-agent] usage",
-      "usage: /inter-agent <connect|disconnect|kick|rename|send|broadcast|publish|channels|subscribe|unsubscribe|list|setup|status|doctor|delivery> [args]; control: /inter-agent control <target> <command> [text]",
+      "usage: /inter-agent <connect|disconnect|kick|rename|send|broadcast|publish|channels|subscribe|unsubscribe|list|setup|status|doctor|delivery> [args]; flush: /inter-agent flush [count]; control: /inter-agent control <target> <command> [text]",
       "warning",
     );
   }
@@ -3127,6 +3211,9 @@ export default function (pi: ExtensionAPI) {
           break;
         case "delivery":
           await handleDelivery(rest, ctx);
+          break;
+        case "flush":
+          await handleFlush(rest, ctx);
           break;
         case "control":
           await handleControl(rest, ctx);

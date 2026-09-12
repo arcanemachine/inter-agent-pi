@@ -7,7 +7,12 @@ the split-generation source extracted from the coordinated monorepo
 
 ## Unreleased
 
-No unreleased changes.
+- Add `/inter-agent flush [count]` to move unread mailbox messages into context
+  as one batch with a single triggered turn. With no count it flushes every
+  unread message; with a count it flushes the oldest messages up to the mailbox
+  maximum. An empty mailbox reports that there is nothing to flush without
+  adding context or a turn, and `inter_agent_read_messages` remains available
+  for model-directed or exact-ID reads.
 
 ## 0.4.1 — Expanded outgoing tool information
 

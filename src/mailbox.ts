@@ -216,6 +216,11 @@ export function parseIncoming(text: string): {
   return { from: null, text };
 }
 
+/** Describe a destination as `on <channel>`, `to <target>`, or broadcast. */
+export function describeDestination(channel?: string, target?: string): string {
+  return channel ? `on ${channel}` : target ? `to ${target}` : "via broadcast";
+}
+
 /**
  * Derive kind/toInfo consistently from `channel`, then `to`, else broadcast.
  * Returns null for a frame lacking a non-empty string `msg_id` so the caller
@@ -248,11 +253,7 @@ export function deriveInboundMetadata(msg: {
     : target
       ? "direct"
       : "broadcast";
-  const toInfo = channel
-    ? `on ${channel}`
-    : target
-      ? `to ${target}`
-      : "via broadcast";
+  const toInfo = describeDestination(channel, target);
   return { msgId: msg.msg_id, sender, body, kind, channel, target, toInfo };
 }
 
@@ -337,6 +338,17 @@ export class Mailbox {
       evicted = true;
     }
     return { status: "added", duplicate: false, evicted };
+  }
+
+  /**
+   * Copies of the unread entries in arrival order without removing them. A
+   * positive `count` bounds the selection to the oldest entries; omitting it
+   * selects every unread entry.
+   */
+  selectUnread(count?: number): MailboxMessage[] {
+    if (count === undefined) return this.messages.map((m) => ({ ...m }));
+    if (!Number.isInteger(count) || count < 1) return [];
+    return this.messages.slice(0, count).map((m) => ({ ...m }));
   }
 
   /** Remove and return messages. `ids === undefined` reads all unread. */
@@ -601,6 +613,11 @@ export class MailboxDispatcher {
   /** Read and remove messages; shared by the read tool. */
   read(ids?: string[]): MailboxReadResult {
     return this.mailbox.read(ids);
+  }
+
+  /** Copies of the oldest unread entries without removing them. */
+  selectUnread(count?: number): MailboxMessage[] {
+    return this.mailbox.selectUnread(count);
   }
 
   snapshot(): MailboxSnapshot {

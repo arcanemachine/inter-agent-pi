@@ -17,7 +17,11 @@ import ext, {
   _setStopTimeoutsForTest,
 } from "../../src/index.js";
 import type { ContextEvent } from "@earendil-works/pi-coding-agent";
-import type { ReloadHandoff, ReloadHandoffCarrier } from "../../src/mailbox.js";
+import {
+  MAILBOX_MAX_UNREAD,
+  type ReloadHandoff,
+  type ReloadHandoffCarrier,
+} from "../../src/mailbox.js";
 
 // ── Fake Pi runtime ─────────────────────────────────────────────────────────
 
@@ -97,6 +101,8 @@ class FakeCtx {
   idle = true;
   pendingMessages = false;
   sessionId = "reload-session-1";
+  waitForIdleCalls = 0;
+  #idleWaiters: (() => void)[] = [];
 
   constructor(
     branch: BranchEntry[],
@@ -120,12 +126,34 @@ class FakeCtx {
   hasPendingMessages(): boolean {
     return this.pendingMessages;
   }
+
+  /** Mirrors Pi: resolves immediately when idle, otherwise waits for idle. */
+  waitForIdle(): Promise<void> {
+    this.waitForIdleCalls += 1;
+    if (this.idle) return Promise.resolve();
+    return new Promise((resolve) => {
+      this.#idleWaiters.push(resolve);
+    });
+  }
+
+  /** Set idleness and release waiters when transitioning to idle. */
+  setIdle(idle: boolean): void {
+    this.idle = idle;
+    if (!idle) return;
+    const waiters = this.#idleWaiters;
+    this.#idleWaiters = [];
+    for (const resolve of waiters) resolve();
+  }
 }
 
 class FakePi {
   readonly commands = new Map<
     string,
-    { handler: Handler; description?: string }
+    {
+      handler: Handler;
+      description?: string;
+      getArgumentCompletions?: Handler;
+    }
   >();
   readonly tools = new Map<string, { execute: Handler }>();
   readonly renderers = new Map<string, unknown>();
@@ -135,6 +163,9 @@ class FakePi {
   readonly branch: BranchEntry[] = [];
   readonly notifyLog: { message: string; type: string }[] = [];
   readonly ctx: FakeCtx;
+  /** 1-based sendMessage call index to fail from, or null for no failure. */
+  failSendMessageAt: number | null = null;
+  #sendMessageCalls = 0;
   #flagValue: unknown = undefined;
 
   constructor() {
@@ -149,11 +180,16 @@ class FakePi {
 
   registerCommand(
     name: string,
-    options: { handler: Handler; description?: string },
+    options: {
+      handler: Handler;
+      description?: string;
+      getArgumentCompletions?: Handler;
+    },
   ): void {
     this.commands.set(name, {
       handler: options.handler,
       description: options.description,
+      getArgumentCompletions: options.getArgumentCompletions,
     });
   }
 
@@ -186,7 +222,20 @@ class FakePi {
     },
     options: { triggerTurn?: boolean; deliverAs?: string },
   ): void {
+    this.#sendMessageCalls += 1;
+    if (
+      this.failSendMessageAt !== null &&
+      this.#sendMessageCalls >= this.failSendMessageAt
+    ) {
+      throw new Error("sendMessage failed (test)");
+    }
     this.messages.push({ message, options });
+  }
+
+  /** Fail sendMessage calls from `index` (1-based) onward; null clears it. */
+  failSendMessagesFrom(index: number | null): void {
+    this.#sendMessageCalls = 0;
+    this.failSendMessageAt = index;
   }
 
   appendEntry(customType: string, data: unknown): void {
@@ -410,7 +459,10 @@ async function runHandler(
   }
 }
 
-function interAgentCommand(pi: FakePi): { handler: Handler } {
+function interAgentCommand(pi: FakePi): {
+  handler: Handler;
+  getArgumentCompletions?: Handler;
+} {
   const cmd = pi.commands.get("inter-agent");
   if (!cmd) throw new Error("inter-agent command not registered");
   return cmd;
@@ -463,6 +515,66 @@ function emitDirectMsg(
       to: name,
     }) + "\n",
   );
+}
+
+/** Emit one queued `msg` frame with the given routing metadata. */
+function emitMailboxMsg(
+  listener: FakeChildProcess,
+  msg: {
+    msgId: string;
+    from: string;
+    text: string;
+    to?: string;
+    channel?: string;
+  },
+): void {
+  listener.emitStdout(
+    JSON.stringify({
+      op: "msg",
+      msg_id: msg.msgId,
+      from_name: msg.from,
+      text: msg.text,
+      ...(msg.to ? { to: msg.to } : {}),
+      ...(msg.channel ? { channel: msg.channel } : {}),
+    }) + "\n",
+  );
+}
+
+/** Connect `name` and mark the listener ready with a welcome frame. */
+async function connectQueued(
+  pi: FakePi,
+  listeners: FakeChildProcess[],
+  name = "rx",
+): Promise<FakeChildProcess> {
+  await interAgentCommand(pi).handler(`connect ${name}`, pi.ctx);
+  const listener = listeners[listeners.length - 1];
+  listener.emitStdout(JSON.stringify({ op: "welcome" }) + "\n");
+  await tick();
+  return listener;
+}
+
+/** Custom `inter-agent-message` entries the extension added to context. */
+function inboundMessages(pi: FakePi): RecordedMessage[] {
+  return pi.messages.filter(
+    (entry) => entry.message.customType === "inter-agent-message",
+  );
+}
+
+function triggeredMessages(pi: FakePi): RecordedMessage[] {
+  return pi.messages.filter((entry) => entry.options.triggerTurn === true);
+}
+
+/** Notifications emitted by the flush command (success or failure). */
+function flushNotices(pi: FakePi): { message: string; type: string }[] {
+  return pi.notifyLog.filter((entry) =>
+    entry.message.startsWith("[inter-agent] flush"),
+  );
+}
+
+function lastFlushNotice(pi: FakePi): { message: string; type: string } {
+  const notices = flushNotices(pi);
+  assert.ok(notices.length > 0, "expected a flush notification");
+  return notices[notices.length - 1];
 }
 
 // ── Tests ───────────────────────────────────────────────────────────────────
@@ -1874,4 +1986,453 @@ test("project TLS/data config overrides conflicting globals and propagates to li
       }
     },
   );
+});
+
+// ── Flush command ───────────────────────────────────────────────────────────
+
+type InboundDetails = {
+  from: string;
+  text: string;
+  toInfo: string;
+  displayContent: string;
+};
+
+function inboundDetails(entry: RecordedMessage): InboundDetails {
+  return entry.message.details as InboundDetails;
+}
+
+/** Project settings that keep queued bodies in the mailbox for the test. */
+const QUEUED_PROJECT = {
+  deliveryMode: "queued",
+  mailboxNoticeDebounceMs: 5000,
+};
+
+test("flush with no argument moves every unread message into context and clears them", async () => {
+  await withEnv({ project: QUEUED_PROJECT }, async ({ pi, listeners }) => {
+    const listener = await connectQueued(pi, listeners);
+    emitMailboxMsg(listener, {
+      msgId: "m1",
+      from: "alice",
+      text: "first body",
+      to: "rx",
+    });
+    emitMailboxMsg(listener, {
+      msgId: "m2",
+      from: "bob",
+      text: "second body",
+      channel: "ops",
+    });
+    await tick();
+
+    await interAgentCommand(pi).handler("flush", pi.ctx);
+
+    const injected = inboundMessages(pi);
+    assert.equal(injected.length, 2);
+    assert.deepEqual(
+      injected.map((entry) => inboundDetails(entry).text),
+      ["first body", "second body"],
+    );
+    // Each selected message uses the existing immediate-delivery representation.
+    for (const entry of injected) {
+      assert.equal(entry.message.customType, "inter-agent-message");
+      assert.equal(entry.message.display, true);
+    }
+    // Earlier entries do not trigger; only the final entry starts one turn.
+    assert.deepEqual(
+      injected.map((entry) => entry.options.triggerTurn),
+      [false, true],
+    );
+    // Nothing uses a follow-up delivery queue.
+    assert.deepEqual(
+      injected.map((entry) => entry.options.deliverAs),
+      [undefined, undefined],
+    );
+    assert.equal(triggeredMessages(pi).length, 1);
+
+    const notice = lastFlushNotice(pi);
+    assert.equal(notice.type, "info");
+    assert.ok(notice.message.includes("2 message(s) flushed to context"));
+    assert.ok(notice.message.includes("0 unread remaining"));
+    assert.ok(!notice.message.includes("first body"));
+    assert.ok(!notice.message.includes("second body"));
+
+    const read = (await readTool(pi).execute(
+      "c",
+      {},
+      undefined,
+      undefined,
+      pi.ctx,
+    )) as { details: { read: unknown[] } };
+    assert.equal(read.details.read.length, 0);
+  });
+});
+
+test("flush count selects the oldest unread messages and leaves newer ones unread", async () => {
+  await withEnv({ project: QUEUED_PROJECT }, async ({ pi, listeners }) => {
+    const listener = await connectQueued(pi, listeners);
+    for (const [msgId, text] of [
+      ["m1", "one"],
+      ["m2", "two"],
+      ["m3", "three"],
+    ] as const) {
+      emitMailboxMsg(listener, { msgId, from: "alice", text, to: "rx" });
+    }
+    await tick();
+
+    await interAgentCommand(pi).handler("flush 1", pi.ctx);
+
+    assert.deepEqual(
+      inboundMessages(pi).map((entry) => inboundDetails(entry).text),
+      ["one"],
+    );
+    assert.deepEqual(
+      inboundMessages(pi).map((entry) => entry.options.triggerTurn),
+      [true],
+    );
+    assert.equal(triggeredMessages(pi).length, 1);
+    assert.ok(lastFlushNotice(pi).message.includes("2 unread remaining"));
+
+    // Newer unread entries remain available to the read tool.
+    const read = (await readTool(pi).execute(
+      "c",
+      {},
+      undefined,
+      undefined,
+      pi.ctx,
+    )) as { details: { read: { id: string; body: string }[] } };
+    assert.deepEqual(
+      read.details.read.map((entry) => entry.id),
+      ["m2", "m3"],
+    );
+  });
+});
+
+test("flush accepts the mailbox capacity and flushes all when the count exceeds the unread total", async () => {
+  await withEnv({ project: QUEUED_PROJECT }, async ({ pi, listeners }) => {
+    const listener = await connectQueued(pi, listeners);
+    emitMailboxMsg(listener, {
+      msgId: "m1",
+      from: "alice",
+      text: "one",
+      to: "rx",
+    });
+    emitMailboxMsg(listener, {
+      msgId: "m2",
+      from: "bob",
+      text: "two",
+      to: "rx",
+    });
+    await tick();
+
+    await interAgentCommand(pi).handler(`flush ${MAILBOX_MAX_UNREAD}`, pi.ctx);
+    assert.equal(inboundMessages(pi).length, 2);
+    assert.ok(lastFlushNotice(pi).message.includes("0 unread remaining"));
+
+    // One above the mailbox capacity is rejected without touching the mailbox.
+    emitMailboxMsg(listener, {
+      msgId: "m3",
+      from: "carol",
+      text: "three",
+      to: "rx",
+    });
+    await tick();
+    const injectedBefore = inboundMessages(pi).length;
+    await interAgentCommand(pi).handler(
+      `flush ${MAILBOX_MAX_UNREAD + 1}`,
+      pi.ctx,
+    );
+    const failure = lastFlushNotice(pi);
+    assert.equal(failure.type, "error");
+    assert.ok(failure.message.includes("usage: /inter-agent flush [count]"));
+    assert.equal(inboundMessages(pi).length, injectedBefore);
+    const read = (await readTool(pi).execute(
+      "c",
+      {},
+      undefined,
+      undefined,
+      pi.ctx,
+    )) as { details: { read: { id: string }[] } };
+    assert.deepEqual(
+      read.details.read.map((entry) => entry.id),
+      ["m3"],
+    );
+  });
+});
+
+test("flush rejects malformed counts without inspecting, injecting, or removing", async () => {
+  await withEnv({ project: QUEUED_PROJECT }, async ({ pi, listeners }) => {
+    const listener = await connectQueued(pi, listeners);
+    emitMailboxMsg(listener, {
+      msgId: "m1",
+      from: "alice",
+      text: "first body",
+      to: "rx",
+    });
+    emitMailboxMsg(listener, {
+      msgId: "m2",
+      from: "bob",
+      text: "second body",
+      to: "rx",
+    });
+    await tick();
+
+    const invalid = ["0", "-1", "+1", "1.5", "one", "1 2", "1x", "1e1", "0x1"];
+    for (const arg of invalid) {
+      await interAgentCommand(pi).handler(`flush ${arg}`, pi.ctx);
+      const notice = lastFlushNotice(pi);
+      assert.equal(notice.type, "error", `flush ${arg}`);
+      assert.ok(
+        notice.message.includes("usage: /inter-agent flush [count]"),
+        `flush ${arg}`,
+      );
+    }
+    assert.equal(flushNotices(pi).length, invalid.length);
+    assert.equal(inboundMessages(pi).length, 0);
+    assert.equal(triggeredMessages(pi).length, 0);
+    assert.ok(
+      !pi.notifyLog.some((entry) => entry.message.includes("first body")),
+    );
+
+    const read = (await readTool(pi).execute(
+      "c",
+      {},
+      undefined,
+      undefined,
+      pi.ctx,
+    )) as { details: { read: unknown[] } };
+    assert.equal(read.details.read.length, 2);
+  });
+});
+
+test("flush on an empty mailbox notifies without context, turn, or mutation", async () => {
+  await withEnv({ project: QUEUED_PROJECT }, async ({ pi }) => {
+    const messagesBefore = pi.messages.length;
+    const emptyBody =
+      "This session's inter-agent mailbox is empty, so there are no messages to flush.";
+
+    await interAgentCommand(pi).handler("flush", pi.ctx);
+    await interAgentCommand(pi).handler("flush 1", pi.ctx);
+
+    // Both valid forms report the empty mailbox once, as user-facing info only.
+    assert.equal(flushNotices(pi).length, 2);
+    for (const notice of flushNotices(pi)) {
+      assert.equal(notice.type, "info");
+      assert.ok(notice.message.endsWith(emptyBody), notice.message);
+    }
+    assert.equal(pi.messages.length, messagesBefore);
+    assert.equal(triggeredMessages(pi).length, 0);
+  });
+});
+
+test("flush preserves bodies, sender, destination metadata, and arrival order", async () => {
+  await withEnv({ project: QUEUED_PROJECT }, async ({ pi, listeners }) => {
+    const listener = await connectQueued(pi, listeners);
+    const longBody = "line one\nline two\n\nline four";
+    emitMailboxMsg(listener, {
+      msgId: "d1",
+      from: "alice",
+      text: longBody,
+      to: "rx",
+    });
+    emitMailboxMsg(listener, {
+      msgId: "b1",
+      from: "bob",
+      text: "broadcast body",
+    });
+    emitMailboxMsg(listener, {
+      msgId: "c1",
+      from: "carol",
+      text: "channel body",
+      channel: "ops",
+    });
+    await tick();
+
+    await interAgentCommand(pi).handler("flush", pi.ctx);
+
+    const injected = inboundMessages(pi);
+    assert.deepEqual(
+      injected.map((entry) => inboundDetails(entry).from),
+      ["alice", "bob", "carol"],
+    );
+    assert.deepEqual(
+      injected.map((entry) => inboundDetails(entry).toInfo),
+      ["to rx", "via broadcast", "on ops"],
+    );
+    assert.deepEqual(
+      injected.map((entry) => inboundDetails(entry).text),
+      [longBody, "broadcast body", "channel body"],
+    );
+    // Existing peer-message trust framing and display rendering are reused.
+    assert.ok(
+      injected[0].message.content.includes(
+        "[inter-agent message from agent alice to rx]",
+      ),
+    );
+    assert.ok(injected[0].message.content.includes(longBody));
+    assert.ok(injected[1].message.content.includes("Peer broadcast."));
+    assert.ok(
+      injected[2].message.content.includes("Peer channel message on ops."),
+    );
+    assert.ok(
+      inboundDetails(injected[2]).displayContent.includes("channel body"),
+    );
+  });
+});
+
+test("flush works after disconnect while unread entries remain", async () => {
+  await withEnv({ project: QUEUED_PROJECT }, async ({ pi, listeners }) => {
+    const listener = await connectQueued(pi, listeners);
+    emitMailboxMsg(listener, {
+      msgId: "m1",
+      from: "alice",
+      text: "after disconnect",
+      to: "rx",
+    });
+    await tick();
+
+    await interAgentCommand(pi).handler("disconnect", pi.ctx);
+    await interAgentCommand(pi).handler("flush", pi.ctx);
+
+    const injected = inboundMessages(pi);
+    assert.equal(injected.length, 1);
+    assert.equal(inboundDetails(injected[0]).text, "after disconnect");
+    assert.equal(triggeredMessages(pi).length, 1);
+  });
+});
+
+test("flush waits for idle before selecting the unread set", async () => {
+  await withEnv({ project: QUEUED_PROJECT }, async ({ pi, listeners }) => {
+    const listener = await connectQueued(pi, listeners);
+    emitMailboxMsg(listener, {
+      msgId: "m1",
+      from: "alice",
+      text: "before busy",
+      to: "rx",
+    });
+    await tick();
+
+    pi.ctx.setIdle(false);
+    const pending = interAgentCommand(pi).handler("flush", pi.ctx);
+    await tick();
+    // Selection has not happened while the agent is busy.
+    assert.equal(pi.ctx.waitForIdleCalls, 1);
+    assert.equal(inboundMessages(pi).length, 0);
+
+    // An arrival while busy is unread when the command reaches the idle point.
+    emitMailboxMsg(listener, {
+      msgId: "m2",
+      from: "bob",
+      text: "during busy",
+      to: "rx",
+    });
+    await tick();
+    pi.ctx.setIdle(true);
+    await pending;
+
+    assert.deepEqual(
+      inboundMessages(pi).map((entry) => inboundDetails(entry).text),
+      ["before busy", "during busy"],
+    );
+    assert.equal(triggeredMessages(pi).length, 1);
+  });
+});
+
+test("flush retains unread entries and reports failure when insertion fails", async () => {
+  await withEnv({ project: QUEUED_PROJECT }, async ({ pi, listeners }) => {
+    const listener = await connectQueued(pi, listeners);
+    emitMailboxMsg(listener, {
+      msgId: "m1",
+      from: "alice",
+      text: "one",
+      to: "rx",
+    });
+    emitMailboxMsg(listener, {
+      msgId: "m2",
+      from: "bob",
+      text: "two",
+      to: "rx",
+    });
+    await tick();
+
+    pi.failSendMessagesFrom(1);
+    await interAgentCommand(pi).handler("flush", pi.ctx);
+
+    const failure = lastFlushNotice(pi);
+    assert.equal(failure.type, "error");
+    assert.ok(failure.message.includes("remain unread"));
+    assert.ok(!failure.message.includes("flushed to context"));
+    assert.equal(inboundMessages(pi).length, 0);
+    assert.equal(triggeredMessages(pi).length, 0);
+
+    const read = (await readTool(pi).execute(
+      "c",
+      {},
+      undefined,
+      undefined,
+      pi.ctx,
+    )) as { details: { read: { id: string }[] } };
+    assert.deepEqual(
+      read.details.read.map((entry) => entry.id),
+      ["m1", "m2"],
+    );
+  });
+
+  await withEnv({ project: QUEUED_PROJECT }, async ({ pi, listeners }) => {
+    const listener = await connectQueued(pi, listeners);
+    emitMailboxMsg(listener, {
+      msgId: "m1",
+      from: "alice",
+      text: "one",
+      to: "rx",
+    });
+    emitMailboxMsg(listener, {
+      msgId: "m2",
+      from: "bob",
+      text: "two",
+      to: "rx",
+    });
+    emitMailboxMsg(listener, {
+      msgId: "m3",
+      from: "carol",
+      text: "three",
+      to: "rx",
+    });
+    await tick();
+
+    // The prefix may already be in context when a later insertion fails.
+    pi.failSendMessagesFrom(2);
+    await interAgentCommand(pi).handler("flush", pi.ctx);
+
+    const injected = inboundMessages(pi);
+    assert.equal(injected.length, 1);
+    assert.equal(injected[0].options.triggerTurn, false);
+    assert.equal(triggeredMessages(pi).length, 0);
+    assert.equal(lastFlushNotice(pi).type, "error");
+
+    const read = (await readTool(pi).execute(
+      "c",
+      {},
+      undefined,
+      undefined,
+      pi.ctx,
+    )) as { details: { read: { id: string }[] } };
+    assert.deepEqual(
+      read.details.read.map((entry) => entry.id),
+      ["m1", "m2", "m3"],
+    );
+  });
+});
+
+test("flush appears in grouped-command autocomplete and usage text", async () => {
+  await withEnv({ project: QUEUED_PROJECT }, async ({ pi }) => {
+    const cmd = interAgentCommand(pi);
+    const completions = (cmd.getArgumentCompletions?.("fl") ?? []) as {
+      value: string;
+    }[];
+    assert.ok(completions.some((item) => item.value === "flush"));
+
+    await cmd.handler("bogus", pi.ctx);
+    const usage = pi.notifyLog[pi.notifyLog.length - 1];
+    assert.ok(usage.message.includes("flush"));
+  });
 });
