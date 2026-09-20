@@ -9,6 +9,13 @@ the split-generation source extracted from the coordinated monorepo
 
 No unreleased changes.
 
+## 0.5.1 — Delivery-mode change notifications
+
+- Notify both the user and agent whenever `/inter-agent delivery` selects
+  queued or immediate delivery. The user retains the standard informational
+  notification, while the agent receives hidden context without triggering a
+  turn; existing unread mailbox messages remain queued and unchanged.
+
 ## 0.5.0 — Mailbox flush command
 
 - Add `/inter-agent flush [count]` to move unread mailbox messages into context
