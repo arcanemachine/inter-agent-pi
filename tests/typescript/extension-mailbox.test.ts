@@ -991,6 +991,34 @@ test("delivery command overrides the session mode for future arrivals only", asy
   );
 });
 
+test("delivery command notifies the agent without triggering a turn", async () => {
+  await withEnv({ project: { deliveryMode: "queued" } }, async ({ pi }) => {
+    const cmd = interAgentCommand(pi);
+
+    await cmd.handler("delivery immediate", pi.ctx);
+    assert.deepEqual(pi.messages[pi.messages.length - 1], {
+      message: {
+        customType: "inter-agent-delivery-change",
+        content:
+          "Inter-agent message delivery is now immediate for future arrivals. Existing unread mailbox messages remain queued and unchanged.",
+        display: false,
+      },
+      options: { triggerTurn: false },
+    });
+
+    await cmd.handler("delivery queued", pi.ctx);
+    assert.deepEqual(pi.messages[pi.messages.length - 1], {
+      message: {
+        customType: "inter-agent-delivery-change",
+        content:
+          "Inter-agent message delivery is now queued for future arrivals. Existing unread mailbox messages remain queued and unchanged.",
+        display: false,
+      },
+      options: { triggerTurn: false },
+    });
+  });
+});
+
 test("delivery command accepts any leading i/q string for the mode", async () => {
   await withEnv({ project: { deliveryMode: "queued" } }, async ({ pi }) => {
     const cmd = interAgentCommand(pi);

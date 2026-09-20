@@ -2900,11 +2900,23 @@ export default function (pi: ExtensionAPI) {
       return;
     }
     mailbox.setDeliveryMode(mode);
+    const deliveryMessage =
+      mode === "immediate"
+        ? "Inter-agent message delivery is now immediate for future arrivals. Existing unread mailbox messages remain queued and unchanged."
+        : "Inter-agent message delivery is now queued for future arrivals. Existing unread mailbox messages remain queued and unchanged.";
     notify(
       "[inter-agent] delivery",
       `future arrivals will be delivered ${
         mode === "immediate" ? "immediately" : "into the mailbox queue"
       }; ${mailbox.size} unread message(s) already queued are left unchanged`,
+    );
+    pi.sendMessage(
+      {
+        customType: "inter-agent-delivery-change",
+        content: deliveryMessage,
+        display: false,
+      },
+      { triggerTurn: false },
     );
   }
 
