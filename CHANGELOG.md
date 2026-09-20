@@ -9,6 +9,13 @@ the split-generation source extracted from the coordinated monorepo
 
 No unreleased changes.
 
+## 0.5.2 — User-focused documentation
+
+- Reorganize the Pi extension README around installation, first use, commands,
+  configuration, message delivery, optional control, and troubleshooting.
+- Document both the runtime command and persistent setting for immediate
+  delivery, along with queued mailbox, flush, capacity, and reload behavior.
+
 ## 0.5.1 — Delivery-mode change notifications
 
 - Notify both the user and agent whenever `/inter-agent delivery` selects
