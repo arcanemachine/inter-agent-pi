@@ -4,299 +4,164 @@
   <img src="https://raw.githubusercontent.com/arcanemachine/inter-agent-pi/main/logo.jpg" alt="inter-agent for Pi logo" width="250" />
 </p>
 
-[`@arcanemachine/inter-agent-pi`](https://www.npmjs.com/package/@arcanemachine/inter-agent-pi) connects a [Pi](https://github.com/earendil-works/pi/tree/main/packages/coding-agent) session to the local [inter-agent](https://github.com/arcanemachine/inter-agent) message bus.
+A [Pi](https://pi.dev) extension for communicating with other agent sessions over the local [inter-agent](https://github.com/arcanemachine/inter-agent) message bus.
 
-The package contains the Pi extension. Its Python helper, `inter-agent-pi`, starts the listener and command runtime on top of [`inter-agent-core`](https://github.com/arcanemachine/inter-agent-core). The extension and helper are installed separately.
+Connect each Pi session under a routing name, then exchange direct messages, broadcasts, and channel publications. Agents can use the same bus through tools, while connection changes and other sensitive operations remain under user control. Optional Pi control adds allowlisted prompting, steering, state inspection, and graceful shutdown.
+
+> Like this extension? See [my other Pi extensions](https://github.com/arcanemachine/pi-projects).
 
 ## Requirements
 
-- [Pi](https://github.com/earendil-works/pi/tree/main/packages/coding-agent)
-- Python 3.10 or newer
+- Pi 0.84.2 or later
+- Python 3.10 or later
 
-The package's Pi coding-agent peer compatibility is `>=0.84.2`. Control and
-the read-only doctor use released public APIs present in Pi `0.84.2` or newer;
-hosts without those APIs are not supported for these workflows. The doctor
-uses Pi's command discovery and prompt-expansion APIs and adds no runtime
-dependencies.
+## Installation
 
-## Install
-
-Use this canonical setup for a released installation:
-
-1. Install the released Pi extension:
-
-   ```text
-   pi install npm:@arcanemachine/inter-agent-pi@0.5.1
-   ```
-
-2. Open Pi and run `/inter-agent setup`. Review the managed destination and
-   compatible helper source, then explicitly approve the operation. Setup uses
-   `python3 -m venv` and the environment's `python -m pip`; end users do not
-   need `uv`, global pip, `sudo`, or a system package manager.
-
-The npm extension and Python helper are published separately. Extension `0.5.1`
-uses the compatible helper line `inter-agent-pi~=0.3.1` (`>=0.3.1,<0.4.0`),
-so patch releases in the `0.3` line are accepted while `0.4` is excluded. The
-helper installs its compatible `inter-agent-core` runtime automatically.
-
-Installation and bus connectivity are separate: installing the extension and
-running setup install local package files, but do not start a server or connect
-a Pi session. The first `/inter-agent connect` starts a healthy local Core
-server when needed.
-
-### Managed setup and recovery
-
-`/inter-agent setup` is the only user-facing managed setup command. It creates
-or updates `$HOME/.pi/agent/inter-agent/venv` after explicit approval and never
-changes endpoint or secret discovery, Core state, credentials, mailbox data,
-listener state, or a configured helper override. A verified incomplete managed
-venv may be repaired with a guarded `python3 -m venv --clear`; an unrecognized
-or unsafe directory is never cleared automatically.
-
-If `/inter-agent connect` reports that the managed runtime is missing or
-repairable, run `/inter-agent setup`. For invalid `INTER_AGENT_PI_HELPER`,
-`interAgent.projectPaths`, PATH helpers, Python/pip failures, endpoint errors,
-authentication failures, or other operational problems, run
-`/inter-agent doctor`. Setup does not repair higher-precedence overrides.
-
-For development or isolated UAT, `INTER_AGENT_PI_SETUP_PYTHON` may name the
-explicit Python executable and `INTER_AGENT_PI_SETUP_SOURCE` may name an
-explicit pip source. These values are passed as direct subprocess arguments;
-there is no shell evaluation or automatic fallback.
-
-Setup failures are bounded and do not automatically retry, invoke doctor, start
-Core, connect a listener, or replay the failed command. `/inter-agent doctor`
-remains explicit and read-only.
-
-After installing and opening Pi, run `/inter-agent setup` for the approved
-managed helper installation. Use `/inter-agent doctor [optional context]` as
-the primary read-only troubleshooting path, especially after a valid
-inter-agent command fails. It performs bounded, read-only diagnostics and
-never auto-repairs or invokes a repair. If the doctor command itself is unavailable,
-check this README's package-loading guidance.
-
-Do not use the standalone `inter-agent-pi status --json` command as a read-only
-substitute for doctor: Core's fallback secret resolution can create or chmod the
-state directory and token file when no explicit secret is configured. The doctor
-skips that status check unless its non-initializing, non-mutating behavior has
-been established. You can install the package from Git instead for source
-development:
+Install the Pi extension from npm:
 
 ```bash
-pi install https://github.com/arcanemachine/inter-agent-pi
+pi install npm:@arcanemachine/inter-agent-pi
+```
+
+Open Pi, then install the compatible Python helper in Pi's managed environment:
+
+```text
+/inter-agent setup
+```
+
+Review and approve the requested setup operation. The extension creates or updates `$HOME/.pi/agent/inter-agent/venv`; normal installation does not require `sudo`, a global Python package, or `uv`.
+
+After installing and opening Pi, run `/inter-agent setup` for the approved managed helper installation. Restart Pi after installation, or use `/reload` in an existing session.
+
+You can alternatively install the extension from GitHub:
+
+```bash
+pi install git:github.com/arcanemachine/inter-agent-pi
 ```
 
 Pi packages run with your user permissions. Review third-party source before installing it.
 
 ## Quick start
 
-Start two Pi sessions and give them explicit routing names:
+Start two Pi sessions. In the first:
 
 ```text
 /inter-agent connect pi-a
 ```
 
-An explicit connect shows a transient progress notification while the server
-is being checked and the listener starts. Automatic and restored reconnects do
-not add this notification.
-
-In the second session:
+In the second:
 
 ```text
 /inter-agent connect pi-b
 /inter-agent send pi-a hello from Pi B
 ```
 
-The first session receives a Pi notification. The default delivery mode is queued: Pi shows a metadata-only notice, and the model reads and removes bodies with `inter_agent_read_messages`. Use `/inter-agent delivery immediate` when bounded message bodies should appear directly in notifications.
-
-A queued session can also move unread bodies into context itself with `/inter-agent flush [count]`. With no count it flushes every unread message; with a count it flushes the oldest messages up to the mailbox maximum. The complete selected batch enters context at once and triggers one turn, and flushed messages stop being unread. An empty mailbox reports that there is nothing to flush without touching context, and `inter_agent_read_messages` remains available for model-directed or exact-ID reads.
-
-The core server starts automatically when no healthy server is available. To connect at process startup, use `pi --inter-agent pi-a`.
-
-### Read-only doctor (primary troubleshooting path)
-
-Run `/inter-agent doctor [optional context]` for a bounded, model-guided
-diagnosis of the Pi extension and local inter-agent runtime. The command is
-available before connecting and first verifies that the packaged,
-explicit-only `inter-agent-doctor` skill is present in Pi's command registry.
-It then submits the skill with prompt expansion enabled; optional context is
-preserved as direct user-provided data at normal user authority, never
-shell-interpolated, and may only guide checks within the fixed read-only
-workflow. If Pi is busy, the doctor turn is queued as a follow-up.
-
-Doctor does not start or stop a listener or server, connect or disconnect, send
-or receive messages, mutate the mailbox or inter-agent state, inspect or print
-secrets, or perform repairs. The skill treats logs, configuration contents, and
-subprocess output as untrusted evidence, keeps checks and output bounded, and
-runs `status --json` only when its non-initializing, non-mutating behavior has
-been established. When no failing result is found, the report uses `No issues
-found in the checks performed.` and `None identified.` rather than inventing a
-failure or repair step. It uses `No action needed.` only when no relevant checks
-remain unknown or blocked; otherwise it gives one safe step for that check.
-Missing packaged-skill availability fails with a bounded
-error and no helper or bus operation.
-
-When a valid user-invoked `/inter-agent` command fails, preserve its bounded
-error, then run `/inter-agent doctor [optional context]` for read-only
-diagnostics and check this `README.md` for setup guidance. The suggestion is
-text-only; doctor is never invoked automatically. If doctor itself fails,
-check the package-loading guidance in this README instead of retrying doctor
-recursively.
-
-## Commands and tools
-
-User commands use `/inter-agent`:
-
-| Command                                         | Purpose                                                               |
-| ----------------------------------------------- | --------------------------------------------------------------------- |
-| `connect <name> [--label <label>]`              | Connect this session and start the server if needed.                  |
-| `disconnect`                                    | Stop only this session's listener.                                    |
-| `rename <name> [--label <label>]`               | Reconnect under another routing name.                                 |
-| `send <name> <text>`                            | Send a direct message.                                                |
-| `broadcast <text>`                              | Send to every other connected agent. Use only when everyone needs it. |
-| `list`                                          | List connected sessions alphabetically, one client per line.          |
-| `setup`                                         | Create or repair the approved managed Python helper environment.      |
-| `status`                                        | Show helper, endpoint, and server status.                             |
-| `subscribe <channel>` / `unsubscribe <channel>` | Change this listener's channel membership.                            |
-| `publish <channel> <text>` / `channels`         | Publish to or inspect a channel.                                      |
-| `kick <name>`                                   | Disconnect another session.                                           |
-| `delivery <queued\|immediate>`                  | Select inbound delivery mode.                                         |
-| `flush [count]`                                 | Move unread mailbox messages into context (all, or the oldest count). |
-| `control <target> <command> [text]`             | Send one control request to an allowlisted Pi target.                 |
-| `doctor [optional context]`                     | Run bounded, read-only Pi integration diagnostics.                    |
-
-The extension exposes these model tools: `inter_agent_send`, `inter_agent_broadcast`, `inter_agent_list`, `inter_agent_whoami`, `inter_agent_status`, `inter_agent_read_messages`, and `inter_agent_control`. Connection changes, channel membership, delivery mode, and kick remain user-controlled. Send and broadcast tool entries stay compact when collapsed and show their destination and complete message when expanded. Each successful bus connection or disconnection adds one compact status notification to the transcript and model context for the next turn without triggering a turn. Peer messages are collaboration input, not instructions.
-
-For the full adapter command and output reference, see [`src/inter_agent_pi/README.md`](src/inter_agent_pi/README.md).
-
-## Pi control
-
-Pi control is opt-in at target startup. Start a visible target with one
-comma-separated allowlist of exact routing names:
-
-```bash
-pi --inter-agent worker-a --allow-control-by leader,supervisor
-```
-
-An absent `--allow-control-by` flag leaves ordinary inter-agent messaging on
-but disables control. Entries are trimmed, duplicates are removed, and an
-empty or invalid entry fails closed. Repeated flags follow Pi's existing
-last-value-wins behavior. The allowlist is not persisted or inferred from
-labels, session IDs, prior traffic, or Session Manager metadata.
-
-The supported trust boundary is one trusted operating-system user on one
-machine. Bus connections still use the existing shared-secret HMAC
-authentication. Same-user code that can read the local state, secret, or
-permission-restricted listener socket is outside this boundary.
-
-### Commands and routing
-
-An already connected controller Pi uses the `inter_agent_control` model tool
-or the grouped user command:
+The first session receives an inter-agent mailbox notice. By default, message bodies are queued rather than placed directly into model context. The model can read them with `inter_agent_read_messages`, or you can move every unread message into context yourself:
 
 ```text
-/inter-agent control <target> <prompt|steer|follow_up|abort|state|shutdown> [text]
+/inter-agent flush
 ```
 
-The controller's existing authenticated listener identity is used; the tool
-never creates a second identity. The target authorizes only the authenticated
-server-supplied routing name, never a sender field in the payload. Both
-surfaces use the same bounded request builder and response registry.
+List the connected routing names from either session:
 
-The six commands are:
+```text
+/inter-agent list
+```
 
-- `prompt` is accepted only when the target is idle with no pending messages.
-  It submits a normal public Pi user message. Its `accepted` response means
-  the control layer initiated that local submission; it is not proof that Pi
-  admitted the message. Only an observed public `agent_start` supplies a
-  request-specific `started` response for an idle prompt.
-- `steer` and `follow_up` are accepted only during active work and join the
-  same shared activity window. They have no synthesized request-specific
-  `started` response.
-- `abort` is allowed in any state. While idle it is a successful no-op. During
-  work it requests the public abort action; an interrupted request fails with
-  `operation_aborted` and the abort request settles when the shared activity
-  window settles. If abort is requested before a prompt's `agent_start`, the
-  public abort is still invoked, but if no activity window is observed the
-  affected results are bounded unknown outcomes rather than claims of an
-  interruption.
-- `state` returns only privacy-safe lifecycle, pending-message, active-request,
-  listener-readiness, routing-name, control-enabled, and allowlist-count
-  fields. It never returns prompts, transcript text, thinking, tools, paths,
-  models, providers, credentials, or Session Manager details.
-- `shutdown` enters `shutting_down`, best-effort sends its terminal response,
-  and calls Pi's public graceful shutdown API. It does not claim that the Pi
-  process or terminal host has exited; later requests are rejected as
-  `shutting_down`.
+The first connection starts a healthy local Core server automatically when needed. To connect when Pi starts, use:
 
-Run-affecting results describe the shared activity window and settle only at
-Pi's public `agent_settled` event, after retries, compaction, and queued
-continuations. A final response is observational and is never presented as an
-exclusive causal result when human or other extension activity interleaves.
-Human/RPC interleaving is reported when the public input events reveal it. The
-released API does not identify other extension provenance, so absence of an
-observed event is not proof that no other extension contributed.
+```bash
+pi --inter-agent pi-a
+```
 
-### Bounds, retries, and lifecycle
+## Message delivery
 
-- Injected text is limited to 32 KiB UTF-8; final assistant text is limited to
-  8 KiB with truncation and original-byte-length metadata; error messages are
-  limited to 1 KiB. The local helper bridge retains its 64 KiB request/response
-  bound and carries payloads over stdin rather than shell arguments.
-- The controller waits up to five seconds for the initial acknowledgement. A
-  timeout, helper failure, or unconfirmed local submission is an unknown
-  outcome. Do not retry automatically. A deliberately supplied `requestId`
-  can replay a known request while it remains in the target's process-local
-  cache.
-- The target retains at most the latest 256 request records per authenticated
-  sender. Duplicates within that horizon replay their latest response without
-  executing again; evicted IDs may execute again. Records, queues, and results
-  are cleared on reload or process restart and are never persisted to
-  transcripts, settings, environment, argv, or the filesystem.
-- During a transient listener reconnect, bounded terminal responses wait for
-  the next `welcome` before flushing. Reload and explicit disconnect/rename
-  fail active work with `target_reloading` or `target_disconnected`; no command
-  is resumed or automatically retried. Control frames and unknown custom
-  frames never enter the ordinary mailbox, and ordinary direct, broadcast,
-  channel, mailbox, reload, and reconnect behavior remains available.
+Incoming direct messages, broadcasts, and channel publications use one of two delivery modes:
 
-Control and doctor use only the released public Pi APIs present in Pi
-`0.84.2` or newer and have no maintained Pi fork, host patch, runtime
-monkey-patch, private import, prompt marker, transcript persistence, or
-model-mediated acknowledgement.
-Session Manager is neither required nor coupled; it has no role in routing,
-readiness, allowlists, protocol, or control state.
+| Mode        | Behavior                                                                                                                                                                            |
+| ----------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `queued`    | Default. Stores bodies in the in-memory mailbox and shows a metadata-only notice. The model reads messages with `inter_agent_read_messages`, or the user flushes them into context. |
+| `immediate` | Places future message bodies directly into follow-up context. An idle Pi starts a turn immediately; a busy Pi holds arrivals until the active work settles.                         |
 
-For optional visible worker hosting in a dedicated tmux server, see the
-[Session Manager composition guide](SESSION_MANAGER.md). Plain terminals and
-ordinary tmux remain the baseline.
+Select a mode for the current Pi runtime:
 
-## Connection and mailbox behavior
+```text
+/inter-agent delivery immediate
+/inter-agent delivery queued
+```
 
-The default mailbox is queued and capped at 128 unread messages. A same-process `/reload` preserves unread messages; an explicit disconnect or process restart begins with an empty mailbox. Transient listener failures use bounded reconnect attempts and restore desired channel subscriptions. Authentication, invalid-name, name-conflict, and kick failures require user action. `/inter-agent list` sorts connected routing names alphabetically and renders one client per line; labels are display metadata and do not affect ordering.
-
-`/inter-agent flush [count]` moves unread mailbox bodies into context without asking the model to call `inter_agent_read_messages`. It keeps each message's body, sender, and destination metadata, entering the selected messages in arrival order and triggering exactly one turn for the batch. A count must be a positive integer no larger than the mailbox capacity; a count smaller than the unread total flushes the oldest messages and leaves the rest unread. An empty mailbox shows that there is nothing to flush and adds no context entry or turn. `/inter-agent flush` is a user command and does not require an active bus connection, so it can move messages retained after a listener disconnect.
-
-The default bus endpoint is `127.0.0.1:16837`. Local sessions share endpoint, state, and secret discovery through `inter-agent-core`. Loopback transport defaults to plaintext WebSockets; configured or non-loopback deployments can use TLS. TLS failures never fall back automatically to plaintext.
-
-## Configuration and recovery
-
-Pi reads `interAgent` settings from global `~/.pi/agent/settings.json`, then
-project `.pi/settings.json`; project values override individual global values.
-Supported keys include `host`, `port`, `dataDir`, `secret`, `tls`, `tlsCert`,
-`tlsKey`, `projectPaths`, `deliveryMode`, and `mailboxNoticeDebounceMs`.
-
-`projectPaths` is always a non-empty list of non-empty checkout-path strings.
-Each candidate is resolved relative to the settings file that contains the list,
-and `~` expands to the home directory. For global settings, prefer explicit
-absolute paths when you want checkout selection independent of settings-file
-location; relative paths remain supported and are anchored to the settings file,
-not the current working directory. A shared settings file can therefore name
-both host and container checkouts:
+The command affects future arrivals only. Existing unread messages remain queued. To make immediate delivery the configured default, add this to Pi's global or project settings and reload Pi:
 
 ```json
 {
   "interAgent": {
+    "deliveryMode": "immediate"
+  }
+}
+```
+
+The mailbox holds at most 128 unread messages. When it is full, the oldest unread message is evicted. A same-process `/reload` preserves unread messages; a process restart starts with an empty mailbox.
+
+Use `/inter-agent flush [count]` to move queued messages into context without waiting for the model to call a tool. With no count, it flushes every unread message. With a count, it flushes the oldest messages up to that count. The selected batch enters context in arrival order and triggers one turn. Flushed messages are removed from the unread mailbox.
+
+## Commands and tools
+
+All user commands are grouped under `/inter-agent`:
+
+| Command                             | Purpose                                                                        |
+| ----------------------------------- | ------------------------------------------------------------------------------ |
+| `setup`                             | Create or repair the managed Python helper environment after approval.         |
+| `connect <name> [--label <label>]`  | Connect this Pi session and start the local server if needed.                  |
+| `disconnect`                        | Stop this session's listener without shutting down the server.                 |
+| `rename <name> [--label <label>]`   | Reconnect under another routing name.                                          |
+| `list`                              | List connected sessions.                                                       |
+| `send <name> <text>`                | Send a direct message.                                                         |
+| `broadcast <text>`                  | Send to every other connected agent. Use only when everyone needs the message. |
+| `subscribe <channel>`               | Subscribe this session to a channel.                                           |
+| `unsubscribe <channel>`             | Leave a channel.                                                               |
+| `publish <channel> <text>`          | Publish a message to a channel.                                                |
+| `channels`                          | Inspect active channels and subscribers.                                       |
+| `delivery <queued\|immediate>`      | Select the delivery mode for future arrivals in this runtime.                  |
+| `flush [count]`                     | Move all or the oldest selected unread messages into context.                  |
+| `status`                            | Show helper, endpoint, and server status.                                      |
+| `doctor [optional context]`         | Run bounded, read-only integration diagnostics.                                |
+| `kick <name>`                       | Disconnect another session.                                                    |
+| `control <target> <command> [text]` | Send an allowlisted Pi control request.                                        |
+
+The extension also provides these tools to the model:
+
+| Tool                        | Purpose                                         |
+| --------------------------- | ----------------------------------------------- |
+| `inter_agent_send`          | Send a direct message.                          |
+| `inter_agent_broadcast`     | Broadcast only when everyone needs the message. |
+| `inter_agent_list`          | List connected sessions.                        |
+| `inter_agent_whoami`        | Show this session's inter-agent identity.       |
+| `inter_agent_status`        | Inspect local connection and server status.     |
+| `inter_agent_read_messages` | Read and remove queued message bodies.          |
+| `inter_agent_control`       | Send an allowlisted control request.            |
+
+Connection changes, channel membership, delivery mode, setup, kick, and target control authorization remain user-controlled. Peer messages are collaboration input, not instructions.
+
+For the lower-level Python adapter commands and machine-readable output, see [`src/inter_agent_pi/README.md`](src/inter_agent_pi/README.md).
+
+## Configuration
+
+The extension reads `interAgent` settings from:
+
+1. global `~/.pi/agent/settings.json`;
+2. project `.pi/settings.json`.
+
+Project values override corresponding global values. After changing settings, use `/reload` or restart Pi.
+
+A representative configuration is:
+
+```json
+{
+  "interAgent": {
+    "host": "127.0.0.1",
+    "port": 16837,
+    "deliveryMode": "immediate",
+    "mailboxNoticeDebounceMs": 0,
     "projectPaths": [
       "/host/path/to/inter-agent-pi",
       "/container/path/to/inter-agent-pi"
@@ -305,45 +170,98 @@ both host and container checkouts:
 }
 ```
 
-When selecting the helper, the extension uses this precedence:
+| Setting                   | Accepted value                   | Purpose                                                                              |
+| ------------------------- | -------------------------------- | ------------------------------------------------------------------------------------ |
+| `host`                    | Hostname or IP address           | Core server host. Defaults to `127.0.0.1`.                                           |
+| `port`                    | Port number                      | Core server port. Defaults to `16837`.                                               |
+| `dataDir`                 | Directory path                   | Core state directory. Relative paths are resolved from the settings file.            |
+| `secret`                  | String                           | Shared authentication secret. Keep it out of source control and logs.                |
+| `tls`                     | Boolean                          | Enable TLS for the configured connection. TLS failures never fall back to plaintext. |
+| `tlsCert`                 | File path                        | TLS certificate path. Relative paths are resolved from the settings file.            |
+| `tlsKey`                  | File path                        | TLS private-key path. Never commit or share it.                                      |
+| `projectPaths`            | Non-empty list of checkout paths | Check source checkouts for compatible helper executables, in order.                  |
+| `deliveryMode`            | `"queued"` or `"immediate"`      | Initial inbound delivery mode. Defaults to `"queued"`.                               |
+| `mailboxNoticeDebounceMs` | Integer from `0` through `5000`  | Delay used to coalesce queued mailbox notices. Defaults to `0`.                      |
 
-1. `INTER_AGENT_PI_HELPER`, when set. It must point to the executable
-   `inter-agent-pi` next to the matching `inter-agent-connect` and
-   `inter-agent-server`; an invalid override fails closed.
-2. An explicitly configured `interAgent.projectPaths` list. Candidates are
-   checked in order, and the first checkout whose `.venv/bin` provides all
-   three executable scripts is selected. A malformed list or a list with no
-   valid candidate fails closed; it does not fall through to another helper.
-3. The managed Pi environment at `$HOME/.pi/agent/inter-agent/venv/bin`.
-4. Matching `inter-agent-*` scripts found on `PATH`.
+Invalid delivery or debounce values fall back to their defaults with a warning.
 
-Project settings replace the complete global `projectPaths` list; the lists
-are not concatenated. The former singular `projectPath` key is no longer
-supported and fails closed with migration guidance; use the list form instead.
-Cwd-based project discovery is not part of this setting. If setup fails, check
-that each configured candidate's `.venv/bin` (or the managed/PATH helper)
-provides `inter-agent-pi`,
-`inter-agent-connect`, and `inter-agent-server`. If the server is unavailable,
-run `/inter-agent status`; if authentication fails, ensure the server and
-clients use the same endpoint, state directory, and secret. Use a separate
-endpoint and data directory for tests.
+### Helper selection
 
-For a managed-install recovery, run `/inter-agent setup` and explicitly
-approve the guarded repair. Do not manually delete the managed environment as
-the normal recovery path. Setup refuses to clear a symlink, an unrecognized
-directory, or an unsafe target; use `/inter-agent doctor` for bounded diagnosis
-when it refuses a repair.
+The extension selects the Python helper in this order:
 
-Setup changes only the managed Python environment, not Pi settings, Core state,
-or unread mailbox data. A virtual environment is specific to its machine and
-Python installation; do not copy one between environments. For a source
-checkout, use its own `uv sync --locked` environment and the source-development
-helper override described below instead of changing the managed environment.
+1. `INTER_AGENT_PI_HELPER`, when explicitly set to a compatible `inter-agent-pi` executable;
+2. `interAgent.projectPaths`, using the first checkout whose `.venv/bin` contains compatible `inter-agent-pi`, `inter-agent-connect`, and `inter-agent-server` executables;
+3. Pi's managed environment at `$HOME/.pi/agent/inter-agent/venv/bin`;
+4. compatible `inter-agent-*` executables on `PATH`.
 
-## Development and security
+A configured `projectPaths` list replaces the global list rather than appending to it. Each relative candidate is resolved from the settings file containing it. The former singular `projectPath` setting is unsupported.
 
-For source development, use a checkout-local environment rather than the
-managed released helper:
+For ordinary released installations, omit helper overrides and use `/inter-agent setup`.
+
+### Endpoint and security
+
+Local sessions share endpoint, state, and secret discovery through `inter-agent-core`. Loopback transport defaults to plaintext WebSockets. Use TLS for configured deployments that require it.
+
+The supported trust boundary is one trusted operating-system user on one machine. The shared secret authenticates bus connections; it does not protect against hostile code running as the same user. Never commit or share bus secrets, private keys, certificates, or runtime state.
+
+## Optional Pi control
+
+Pi control lets one connected Pi request work from another without using terminal keystrokes. It is disabled unless the target opts in at startup with an exact controller allowlist:
+
+```bash
+pi --inter-agent worker-a --allow-control-by leader,supervisor
+```
+
+An already connected controller can then use `inter_agent_control` or:
+
+```text
+/inter-agent control worker-a prompt Review the current change
+/inter-agent control worker-a steer Focus on the failing integration test
+/inter-agent control worker-a follow_up Also report the verification commands
+/inter-agent control worker-a abort
+/inter-agent control worker-a state
+/inter-agent control worker-a shutdown
+```
+
+The supported commands are:
+
+- `prompt` — submit work to an idle target;
+- `steer` — redirect active work;
+- `follow_up` — queue additional input for active work;
+- `abort` — request cancellation, or succeed as a no-op while idle;
+- `state` — return privacy-safe lifecycle and readiness information;
+- `shutdown` — request Pi's public graceful shutdown operation.
+
+Authorization uses the controller's authenticated routing name. It is not inferred from labels, payload fields, previous traffic, or Session Manager metadata. Timeouts and interrupted requests can have an unknown outcome; do not retry them automatically. A deliberately reused request ID can replay a retained result without deliberately executing the request again.
+
+Session Manager is optional and remains only a process-hosting and observation layer. For visible tmux-hosted workers, readiness checks, cleanup, and the separation between the two extensions, see [`SESSION_MANAGER.md`](SESSION_MANAGER.md).
+
+## Troubleshooting
+
+Run the read-only doctor as the primary read-only troubleshooting path after a valid inter-agent command fails:
+
+```text
+/inter-agent doctor [optional context]
+```
+
+Doctor runs bounded, read-only diagnostics for the Pi extension and local inter-agent runtime without repairing files, changing connection state, reading message bodies, or exposing secrets. It never auto-repairs. It avoids Core status checks when fallback secret resolution can create or chmod state files. For global settings, prefer explicit absolute paths; relative paths remain supported and are resolved from the settings file.
+
+A healthy report says `No issues found in the checks performed.` and `None identified.` when no failure or follow-up is identified; it says `No action needed.` only when no relevant check remains unknown or blocked.
+
+Use `/inter-agent setup` when the managed helper is missing or incomplete. Setup changes only the managed Python environment; it does not change endpoint settings, Core state, credentials, mailbox contents, or listener state. Higher-precedence helper overrides remain active until you remove or repair them.
+
+Useful checks:
+
+- `/inter-agent status` — inspect helper, endpoint, and server availability;
+- `/inter-agent list` — verify expected routing names are connected;
+- confirm that every client uses the same host, port, state directory, and secret after an authentication failure;
+- use separate endpoints and data directories for tests or isolated trials.
+
+Authentication, invalid-name, name-conflict, and kick failures require user action. Transient listener failures use bounded reconnect attempts and restore desired channel subscriptions. Subscriptions are not persisted across an explicit disconnect or process restart.
+
+## Development
+
+For source development, use a checkout-local environment instead of Pi's managed released helper:
 
 ```bash
 git clone https://github.com/arcanemachine/inter-agent-pi
@@ -353,4 +271,10 @@ npm ci
 INTER_AGENT_PI_HELPER="$PWD/.venv/bin/inter-agent-pi" pi -e "$PWD"
 ```
 
-Run `scripts/run-checks.sh` for the package gate. See [`CHANGELOG.md`](CHANGELOG.md) for released changes and the [`inter-agent-core` security model](https://github.com/arcanemachine/inter-agent-core/blob/main/SECURITY.md) for the trust boundary. Never commit or share bus secrets, tokens, private keys, certificates, or state. MIT; see [`LICENSE.md`](LICENSE.md).
+Run the complete package gate from the repository root:
+
+```bash
+scripts/run-checks.sh
+```
+
+Pi loads `src/index.ts` directly. See [`CHANGELOG.md`](CHANGELOG.md) for released changes and the [`inter-agent-core` security model](https://github.com/arcanemachine/inter-agent-core/blob/main/SECURITY.md) for the full trust boundary.
