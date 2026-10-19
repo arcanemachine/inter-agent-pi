@@ -97,12 +97,17 @@ class FakeCtx {
     notify: (m: string, t?: string) => void;
     setStatus: (k: string, t: string | undefined) => void;
   };
+  readonly statusLog: { key: string; text: string | undefined }[] = [];
   cwd: string;
   idle = true;
   pendingMessages = false;
   sessionId = "reload-session-1";
   waitForIdleCalls = 0;
   #idleWaiters: (() => void)[] = [];
+
+  lastStatusText(): string | undefined {
+    return this.statusLog[this.statusLog.length - 1]?.text;
+  }
 
   constructor(
     branch: BranchEntry[],
@@ -114,7 +119,7 @@ class FakeCtx {
     };
     this.ui = {
       notify: (message, type = "info") => notifyLog.push({ message, type }),
-      setStatus: () => {},
+      setStatus: (key, text) => this.statusLog.push({ key, text }),
     };
     this.cwd = process.cwd();
   }
@@ -325,6 +330,7 @@ function setupEnv(opts: {
   global?: Record<string, unknown>;
   project?: Record<string, unknown>;
   validProjectPaths?: string[];
+  namespace?: "camel" | "hyphen";
 }): { pi: FakePi; home: string; cwd: string } {
   const home = mkdtempSync(join(tmpdir(), "ia-home-"));
   const cwd = mkdtempSync(join(tmpdir(), "ia-cwd-"));
@@ -347,10 +353,12 @@ function setupEnv(opts: {
     }
   }
   mkdirSync(join(home, ".pi", "agent"), { recursive: true });
+  const settingsNamespace =
+    opts.namespace === "hyphen" ? "inter-agent" : "interAgent";
   if (opts.global) {
     writeFileSync(
       join(home, ".pi", "agent", "settings.json"),
-      JSON.stringify({ interAgent: opts.global }),
+      JSON.stringify({ [settingsNamespace]: opts.global }),
     );
   }
   // Project settings always anchor getScripts at the temp project paths so
@@ -375,6 +383,7 @@ function withEnv(
     global?: Record<string, unknown>;
     project?: Record<string, unknown>;
     validProjectPaths?: string[];
+    namespace?: "camel" | "hyphen";
   },
   fn: (api: { pi: FakePi; listeners: FakeChildProcess[] }) => Promise<void>,
 ): Promise<void> {
@@ -735,10 +744,10 @@ test("invalid config keys warn exactly once after UI context is available", asyn
       // First session_start fires both warnings once.
       await runHandler(pi, "session_start", {}, pi.ctx);
       const modeWarnings = pi.notifyLog.filter((n) =>
-        n.message.includes("interAgent.deliveryMode"),
+        n.message.includes("inter-agent.deliveryMode"),
       );
       const debounceWarnings = pi.notifyLog.filter((n) =>
-        n.message.includes("interAgent.mailboxNoticeDebounceMs"),
+        n.message.includes("inter-agent.mailboxNoticeDebounceMs"),
       );
       assert.equal(modeWarnings.length, 1);
       assert.equal(debounceWarnings.length, 1);
@@ -748,11 +757,11 @@ test("invalid config keys warn exactly once after UI context is available", asyn
       await runHandler(pi, "session_start", {}, pi.ctx);
       const newMode = pi.notifyLog
         .slice(before)
-        .filter((n) => n.message.includes("interAgent.deliveryMode"));
+        .filter((n) => n.message.includes("inter-agent.deliveryMode"));
       const newDebounce = pi.notifyLog
         .slice(before)
         .filter((n) =>
-          n.message.includes("interAgent.mailboxNoticeDebounceMs"),
+          n.message.includes("inter-agent.mailboxNoticeDebounceMs"),
         );
       assert.equal(newMode.length, 0);
       assert.equal(newDebounce.length, 0);
@@ -961,6 +970,7 @@ test("delivery command overrides the session mode for future arrivals only", asy
       assert.ok(
         !JSON.stringify(queuedNotice!.message.details).includes(MARKER),
       );
+      assert.equal(pi.ctx.lastStatusText(), "IA: rx ✉️x1 🌐 ");
 
       // Switch to immediate for future arrivals only; the queued body stays unread.
       await cmd.handler("delivery immediate", pi.ctx);
@@ -987,8 +997,84 @@ test("delivery command overrides the session mode for future arrivals only", asy
       };
       assert.equal(result.details.read.length, 1);
       assert.equal(result.details.read[0].body, MARKER);
+      assert.equal(pi.ctx.lastStatusText(), "IA: rx 🌐 ");
     },
   );
+});
+
+test("connected status tracks queued arrivals, partial reads, flushes, and disconnects", async () => {
+  await withEnv(
+    { project: { deliveryMode: "queued" } },
+    async ({ pi, listeners }) => {
+      const listener = await connectQueued(pi, listeners);
+      assert.equal(pi.ctx.lastStatusText(), "IA: rx 🌐 ");
+
+      emitMailboxMsg(listener, {
+        msgId: "m1",
+        from: "alice",
+        text: "one",
+        to: "rx",
+      });
+      emitMailboxMsg(listener, {
+        msgId: "m2",
+        from: "bob",
+        text: "two",
+        to: "rx",
+      });
+      emitMailboxMsg(listener, {
+        msgId: "m3",
+        from: "cara",
+        text: "three",
+        to: "rx",
+      });
+      await tick();
+      assert.equal(pi.ctx.lastStatusText(), "IA: rx ✉️x3 🌐 ");
+
+      await readTool(pi).execute(
+        "read-one",
+        { ids: ["m1"] },
+        undefined,
+        undefined,
+        pi.ctx,
+      );
+      assert.equal(pi.ctx.lastStatusText(), "IA: rx ✉️x2 🌐 ");
+
+      await interAgentCommand(pi).handler("flush 1", pi.ctx);
+      assert.equal(pi.ctx.lastStatusText(), "IA: rx ✉️x1 🌐 ");
+
+      await readTool(pi).execute(
+        "read-last",
+        { ids: ["m3"] },
+        undefined,
+        undefined,
+        pi.ctx,
+      );
+      assert.equal(pi.ctx.lastStatusText(), "IA: rx 🌐 ");
+
+      await interAgentCommand(pi).handler("disconnect", pi.ctx);
+      assert.equal(pi.ctx.lastStatusText(), undefined);
+    },
+  );
+});
+
+test("delivery command with no arguments reports the current mode", async () => {
+  await withEnv({ project: { deliveryMode: "immediate" } }, async ({ pi }) => {
+    const cmd = interAgentCommand(pi);
+    await cmd.handler("delivery", pi.ctx);
+    assert.deepEqual(pi.notifyLog[pi.notifyLog.length - 1], {
+      message: "[inter-agent] delivery: current delivery mode: immediate",
+      type: "info",
+    });
+  });
+
+  await withEnv({ project: { deliveryMode: "queued" } }, async ({ pi }) => {
+    const cmd = interAgentCommand(pi);
+    await cmd.handler("delivery", pi.ctx);
+    assert.deepEqual(pi.notifyLog[pi.notifyLog.length - 1], {
+      message: "[inter-agent] delivery: current delivery mode: queued",
+      type: "info",
+    });
+  });
 });
 
 test("delivery command notifies the agent without triggering a turn", async () => {
@@ -1054,6 +1140,35 @@ test("delivery command accepts any leading i/q string for the mode", async () =>
   });
 });
 
+test("hyphenated settings namespace configures immediate delivery", async () => {
+  await withEnv(
+    {
+      namespace: "hyphen",
+      global: { deliveryMode: "immediate" },
+      project: {},
+    },
+    async ({ pi, listeners }) => {
+      await interAgentCommand(pi).handler("delivery", pi.ctx);
+      assert.deepEqual(pi.notifyLog[pi.notifyLog.length - 1], {
+        message: "[inter-agent] delivery: current delivery mode: immediate",
+        type: "info",
+      });
+
+      await interAgentCommand(pi).handler("connect rx", pi.ctx);
+      emitDirectMsg(listeners[listeners.length - 1], "rx");
+      await tick();
+      assert.ok(
+        pi.messages.some((m) => m.message.customType === "inter-agent-message"),
+      );
+      assert.ok(
+        !pi.messages.some(
+          (m) => m.message.customType === "inter-agent-mailbox",
+        ),
+      );
+    },
+  );
+});
+
 test("project settings override global settings for delivery mode precedence", async () => {
   // Global says immediate; project overrides to queued. Project wins.
   await withEnv(
@@ -1102,6 +1217,7 @@ test("project settings override global settings for delivery mode precedence", a
         details: { read: unknown[] };
       };
       assert.equal(read.details.read.length, 0);
+      assert.equal(pi.ctx.lastStatusText(), "IA: rx 🌐 ");
     },
   );
 });
@@ -1221,6 +1337,7 @@ test("connection transitions notify the model without triggering a turn", async 
         triggerTurn: false,
         deliverAs: "followUp",
       });
+      assert.equal(pi.ctx.lastStatusText(), undefined);
       assert.deepEqual(pi.notifyLog, [
         {
           message:
@@ -1448,6 +1565,72 @@ test("pending settlement before shutdown never flushes", async () => {
           (m) => m.message.customType === "inter-agent-mailbox",
         ),
       );
+    },
+  );
+});
+
+test("compaction_end flushes immediate arrivals held during manual compaction", async () => {
+  await withEnv(
+    { project: { deliveryMode: "immediate" } },
+    async ({ pi, listeners }) => {
+      const cmd = interAgentCommand(pi);
+      await cmd.handler("connect rx", pi.ctx);
+      const listener = listeners[listeners.length - 1];
+      listener.emitStdout(JSON.stringify({ op: "welcome" }) + "\n");
+      pi.ctx.idle = false;
+      listener.emitStdout(
+        JSON.stringify({
+          op: "msg",
+          msg_id: "m1",
+          from_name: "alice",
+          text: MARKER,
+        }) + "\n",
+      );
+      await tick();
+      assert.equal(inboundMessages(pi).length, 0);
+
+      pi.ctx.idle = true;
+      await runHandler(pi, "session_compact", {
+        reason: "manual",
+        fromExtension: false,
+        willRetry: false,
+      });
+      await tick();
+      assert.equal(inboundMessages(pi).length, 1);
+      assert.equal(inboundMessages(pi)[0].options.triggerTurn, true);
+    },
+  );
+});
+
+test("session_compact_failed flushes immediate arrivals after compaction clears", async () => {
+  await withEnv(
+    { project: { deliveryMode: "immediate" } },
+    async ({ pi, listeners }) => {
+      const cmd = interAgentCommand(pi);
+      await cmd.handler("connect rx", pi.ctx);
+      const listener = listeners[listeners.length - 1];
+      listener.emitStdout(JSON.stringify({ op: "welcome" }) + "\n");
+      pi.ctx.idle = false;
+      listener.emitStdout(
+        JSON.stringify({
+          op: "msg",
+          msg_id: "m1",
+          from_name: "alice",
+          text: MARKER,
+        }) + "\n",
+      );
+      await tick();
+      assert.equal(inboundMessages(pi).length, 0);
+
+      pi.ctx.idle = true;
+      await runHandler(pi, "session_compact_failed", {
+        reason: "manual",
+        aborted: true,
+        willRetry: false,
+        fromExtension: false,
+      });
+      await tick();
+      assert.equal(inboundMessages(pi).length, 1);
     },
   );
 });

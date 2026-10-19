@@ -1,4 +1,4 @@
-import { test } from "node:test";
+import { mock, test } from "node:test";
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
 import {
@@ -34,6 +34,9 @@ class FakeCtx {
     getSessionId: () => "setup-list-session",
   };
   readonly notifications: { message: string; type: string }[] = [];
+  readonly widgetRenders: string[] = [];
+  widgetRenderRequests = 0;
+  readonly widgetSetCalls: string[] = [];
   readonly ui = {
     notify: (message: string, type = "info") =>
       this.notifications.push({ message, type }),
@@ -42,8 +45,45 @@ class FakeCtx {
       return this.confirmResult;
     },
     setStatus: (_key: string, _text: string | undefined) => {},
+    setWidget: (key: string, content: unknown) => {
+      this.widgetSetCalls.push(
+        `${key}:${content === undefined ? "clear" : "set"}`,
+      );
+      if (content === undefined) {
+        const widget = this.activeWidget as
+          | { dispose?: () => void }
+          | undefined;
+        widget?.dispose?.();
+        this.activeWidget = undefined;
+        return;
+      }
+      if (typeof content !== "function") return;
+      const tui = {
+        requestRender: () => {
+          this.widgetRenderRequests += 1;
+          this.captureWidget();
+        },
+      };
+      const theme = {
+        fg: (_color: string, text: string) => text,
+      };
+      this.activeWidget = content(tui, theme);
+      this.captureWidget();
+    },
   };
+  private activeWidget:
+    | { render: (width: number) => string[]; dispose?: () => void }
+    | undefined;
+  private captureWidget(): void {
+    if (this.activeWidget) {
+      this.widgetRenders.push(this.activeWidget.render(120).join("\n"));
+    }
+  }
+  disposeWidget(key = "inter-agent-setup"): void {
+    this.ui.setWidget(key, undefined);
+  }
   readonly confirmations: string[] = [];
+  mode: "rpc" | "tui" = "rpc";
   confirmResult = false;
 
   isIdle(): boolean {
@@ -161,7 +201,12 @@ function fakeProcess(
   args: string[],
   calls: { command: string; args: string[] }[],
   home: string,
-  options: { verboseVersion?: boolean; kills?: number[] } = {},
+  options: {
+    verboseVersion?: boolean;
+    kills?: number[];
+    pending?: Promise<void>;
+    exitCode?: number;
+  } = {},
 ): FakeProcess {
   const proc = new EventEmitter() as FakeProcess;
   proc.stdout = new EventEmitter();
@@ -172,7 +217,7 @@ function fakeProcess(
   };
   calls.push({ command: commandName, args });
 
-  queueMicrotask(() => {
+  queueMicrotask(async () => {
     const normalizedArgs = args[0] === "-I" ? args.slice(1) : args;
     const commandArgs =
       normalizedArgs[0] === "-m" &&
@@ -201,7 +246,8 @@ function fakeProcess(
     ) {
       createHelperScripts(home);
     }
-    proc.emit("close", 0);
+    if (options.pending) await options.pending;
+    proc.emit("close", options.exitCode ?? 0);
   });
   return proc;
 }
@@ -213,6 +259,15 @@ function renderText(component: {
     .render(120)
     .map((line) => line.trimEnd())
     .join("\n");
+}
+
+function assertProgressOrder(rendered: string, steps: string[]): void {
+  let previous = -1;
+  for (const step of steps) {
+    const next = rendered.indexOf(step, previous + 1);
+    assert.ok(next > previous, `missing or out-of-order setup step: ${step}`);
+    previous = next;
+  }
 }
 
 async function withExtension(
@@ -251,8 +306,10 @@ test("setup cancellation performs no subprocess work", async () => {
   }) as never);
   try {
     await withExtension(home, cwd, async (pi) => {
+      pi.ctx.mode = "tui";
       await command(pi).handler("setup", pi.ctx);
       assert.equal(spawnCalls, 0);
+      assert.deepEqual(pi.ctx.widgetSetCalls, []);
       assert.match(
         pi.ctx.notifications[pi.ctx.notifications.length - 1]?.message ?? "",
         /setup cancelled/,
@@ -303,8 +360,188 @@ test("approved setup uses compatible pip source and verifies helpers", async () 
         pi.ctx.notifications[pi.ctx.notifications.length - 1]?.message ?? "",
         /managed helper environment ready/,
       );
+      assert.deepEqual(pi.ctx.widgetSetCalls, []);
     });
   } finally {
+    rmSync(home, { recursive: true, force: true });
+    rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
+test("approved setup shows an animated loader with progress steps", async () => {
+  const home = mkdtempSync(join(tmpdir(), "ia-setup-loader-home-"));
+  const cwd = mkdtempSync(join(tmpdir(), "ia-setup-loader-cwd-"));
+  const calls: { command: string; args: string[] }[] = [];
+  try {
+    _setSpawnForTest(((commandName: string, args: string[]) =>
+      fakeProcess(commandName, args, calls, home)) as never);
+    await withExtension(home, cwd, async (pi) => {
+      pi.ctx.mode = "tui";
+      pi.ctx.confirmResult = true;
+      await command(pi).handler("setup", pi.ctx);
+
+      const rendered = pi.ctx.widgetRenders.join("\n");
+      assert.match(rendered, /Setting up inter-agent…/);
+      assert.match(rendered, /Checking Python…/);
+      assert.match(rendered, /Creating Python environment…/);
+      assert.match(rendered, /Checking pip…/);
+      assert.match(rendered, /Installing inter-agent helpers…/);
+      assert.match(rendered, /Verifying installed commands…/);
+      assertProgressOrder(rendered, [
+        "Checking Python…",
+        "Creating Python environment…",
+        "Checking pip…",
+        "Installing inter-agent helpers…",
+        "Verifying installed commands…",
+      ]);
+      assert.deepEqual(pi.ctx.widgetSetCalls, [
+        "inter-agent-setup:set",
+        "inter-agent-setup:clear",
+      ]);
+    });
+  } finally {
+    rmSync(home, { recursive: true, force: true });
+    rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
+test("healthy setup reports ordered progress and stops its timer", async () => {
+  const home = mkdtempSync(join(tmpdir(), "ia-setup-healthy-home-"));
+  const cwd = mkdtempSync(join(tmpdir(), "ia-setup-healthy-cwd-"));
+  const calls: { command: string; args: string[] }[] = [];
+  createHelperScripts(home);
+  mock.timers.enable({ apis: ["setInterval"] });
+  try {
+    _setSpawnForTest(((commandName: string, args: string[]) =>
+      fakeProcess(commandName, args, calls, home)) as never);
+    await withExtension(home, cwd, async (pi) => {
+      pi.ctx.mode = "tui";
+      pi.ctx.confirmResult = true;
+      await command(pi).handler("setup", pi.ctx);
+      const rendered = pi.ctx.widgetRenders.join("\n");
+      assertProgressOrder(rendered, [
+        "Checking Python…",
+        "Checking pip…",
+        "Checking pip…",
+        "Installing inter-agent helpers…",
+        "Verifying installed commands…",
+      ]);
+      const renderRequestsAfterSetup = pi.ctx.widgetRenderRequests;
+      mock.timers.tick(80);
+      assert.equal(pi.ctx.widgetRenderRequests, renderRequestsAfterSetup);
+    });
+  } finally {
+    mock.timers.reset();
+    rmSync(home, { recursive: true, force: true });
+    rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
+test("setup loader remains visible and animated while setup is running", async () => {
+  const home = mkdtempSync(join(tmpdir(), "ia-setup-loader-pending-home-"));
+  const cwd = mkdtempSync(join(tmpdir(), "ia-setup-loader-pending-cwd-"));
+  const calls: { command: string; args: string[] }[] = [];
+  let release!: () => void;
+  const pending = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  let firstProcess = true;
+  mock.timers.enable({ apis: ["setInterval"] });
+  try {
+    _setSpawnForTest(((commandName: string, args: string[]) => {
+      const processOptions = firstProcess ? { pending } : {};
+      firstProcess = false;
+      return fakeProcess(commandName, args, calls, home, processOptions);
+    }) as never);
+    await withExtension(home, cwd, async (pi) => {
+      pi.ctx.mode = "tui";
+      pi.ctx.confirmResult = true;
+      const setup = command(pi).handler("setup", pi.ctx);
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      const beforeTick = pi.ctx.widgetRenderRequests;
+      mock.timers.tick(80);
+      assert.ok(pi.ctx.widgetRenderRequests > beforeTick);
+      const firstProgress = pi.ctx.widgetRenders.filter((entry) =>
+        entry.includes("Checking Python…"),
+      );
+      assert.ok(firstProgress.length >= 2);
+      assert.notEqual(firstProgress[0], firstProgress[1]);
+      pi.ctx.disposeWidget();
+      const renderRequestsAfterDispose = pi.ctx.widgetRenderRequests;
+      mock.timers.tick(80);
+      assert.equal(pi.ctx.widgetRenderRequests, renderRequestsAfterDispose);
+      release();
+      await setup;
+      const renderRequestsAfterSetup = pi.ctx.widgetRenderRequests;
+      mock.timers.tick(80);
+      assert.equal(pi.ctx.widgetRenderRequests, renderRequestsAfterSetup);
+      assert.deepEqual(pi.ctx.widgetSetCalls, [
+        "inter-agent-setup:set",
+        "inter-agent-setup:clear",
+        "inter-agent-setup:clear",
+      ]);
+    });
+  } finally {
+    mock.timers.reset();
+    release();
+    rmSync(home, { recursive: true, force: true });
+    rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
+test("setup loader is cleared after an ordinary setup failure", async () => {
+  const home = mkdtempSync(join(tmpdir(), "ia-setup-loader-failure-home-"));
+  const cwd = mkdtempSync(join(tmpdir(), "ia-setup-loader-failure-cwd-"));
+  const calls: { command: string; args: string[] }[] = [];
+  mock.timers.enable({ apis: ["setInterval"] });
+  try {
+    _setSpawnForTest(((commandName: string, args: string[]) =>
+      fakeProcess(commandName, args, calls, home, { exitCode: 1 })) as never);
+    await withExtension(home, cwd, async (pi) => {
+      pi.ctx.mode = "tui";
+      pi.ctx.confirmResult = true;
+      await command(pi).handler("setup", pi.ctx);
+      assert.deepEqual(pi.ctx.widgetSetCalls, [
+        "inter-agent-setup:set",
+        "inter-agent-setup:clear",
+      ]);
+      assert.match(
+        pi.ctx.notifications[pi.ctx.notifications.length - 1]?.message ?? "",
+        /setup failed/,
+      );
+      const renderRequestsAfterFailure = pi.ctx.widgetRenderRequests;
+      mock.timers.tick(80);
+      assert.equal(pi.ctx.widgetRenderRequests, renderRequestsAfterFailure);
+    });
+  } finally {
+    mock.timers.reset();
+    rmSync(home, { recursive: true, force: true });
+    rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
+test("setup loader is cleared when setup throws unexpectedly", async () => {
+  const home = mkdtempSync(join(tmpdir(), "ia-setup-loader-error-home-"));
+  const cwd = mkdtempSync(join(tmpdir(), "ia-setup-loader-error-cwd-"));
+  mock.timers.enable({ apis: ["setInterval"] });
+  try {
+    _setSpawnForTest((() => {
+      throw new Error("unexpected setup failure");
+    }) as never);
+    await withExtension(home, cwd, async (pi) => {
+      pi.ctx.mode = "tui";
+      pi.ctx.confirmResult = true;
+      await assert.rejects(async () => command(pi).handler("setup", pi.ctx));
+      const renderRequestsAfterError = pi.ctx.widgetRenderRequests;
+      mock.timers.tick(80);
+      assert.equal(pi.ctx.widgetRenderRequests, renderRequestsAfterError);
+      assert.deepEqual(pi.ctx.widgetSetCalls, [
+        "inter-agent-setup:set",
+        "inter-agent-setup:clear",
+      ]);
+    });
+  } finally {
+    mock.timers.reset();
     rmSync(home, { recursive: true, force: true });
     rmSync(cwd, { recursive: true, force: true });
   }
@@ -323,9 +560,51 @@ test("approved setup repairs a verified incomplete managed venv", async () => {
     _setSpawnForTest(((commandName: string, args: string[]) =>
       fakeProcess(commandName, args, calls, home)) as never);
     await withExtension(home, cwd, async (pi) => {
+      pi.ctx.mode = "tui";
       pi.ctx.confirmResult = true;
       await command(pi).handler("setup", pi.ctx);
       assert.ok(calls.some((call) => call.args.includes("--clear")));
+      const rendered = pi.ctx.widgetRenders.join("\n");
+      assertProgressOrder(rendered, [
+        "Checking Python…",
+        "Repairing Python environment…",
+        "Checking pip…",
+        "Installing inter-agent helpers…",
+        "Verifying installed commands…",
+      ]);
+    });
+  } finally {
+    rmSync(home, { recursive: true, force: true });
+    rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
+test("approved setup repairs a healthy environment when its pip check fails", async () => {
+  const home = mkdtempSync(join(tmpdir(), "ia-setup-pip-repair-home-"));
+  const cwd = mkdtempSync(join(tmpdir(), "ia-setup-pip-repair-cwd-"));
+  const calls: { command: string; args: string[] }[] = [];
+  let pipChecks = 0;
+  try {
+    createHelperScripts(home);
+    _setSpawnForTest(((commandName: string, args: string[]) => {
+      const isPipCheck = args.includes("pip") && args.includes("--version");
+      const exitCode = isPipCheck && pipChecks++ === 0 ? 1 : 0;
+      return fakeProcess(commandName, args, calls, home, { exitCode });
+    }) as never);
+    await withExtension(home, cwd, async (pi) => {
+      pi.ctx.mode = "tui";
+      pi.ctx.confirmResult = true;
+      await command(pi).handler("setup", pi.ctx);
+      assert.ok(calls.some((call) => call.args.includes("--clear")));
+      const rendered = pi.ctx.widgetRenders.join("\n");
+      assertProgressOrder(rendered, [
+        "Checking Python…",
+        "Checking pip…",
+        "Repairing Python environment…",
+        "Checking pip…",
+        "Installing inter-agent helpers…",
+        "Verifying installed commands…",
+      ]);
     });
   } finally {
     rmSync(home, { recursive: true, force: true });
@@ -348,8 +627,10 @@ test("setup refuses a managed path through a symlinked parent", async () => {
       throw new Error("unsafe setup must not spawn");
     }) as never);
     await withExtension(home, cwd, async (pi) => {
+      pi.ctx.mode = "tui";
       await command(pi).handler("setup", pi.ctx);
       assert.equal(spawnCalls, 0);
+      assert.deepEqual(pi.ctx.widgetSetCalls, []);
       const failure = pi.ctx.notifications[pi.ctx.notifications.length - 1];
       assert.match(failure?.message ?? "", /no files were changed/);
       assert.match(failure?.message ?? "", /\/inter-agent doctor/);
@@ -374,6 +655,7 @@ test("explicit setup source and interpreter are not disclosed in approval text",
     _setSpawnForTest(((commandName: string, args: string[]) =>
       fakeProcess(commandName, args, calls, home)) as never);
     await withExtension(home, cwd, async (pi) => {
+      pi.ctx.mode = "tui";
       pi.ctx.confirmResult = true;
       await command(pi).handler("setup", pi.ctx);
       assert.equal(calls[0]?.command, "/tmp/custom-python");
@@ -384,6 +666,10 @@ test("explicit setup source and interpreter are not disclosed in approval text",
       assert.doesNotMatch(
         pi.ctx.confirmations[0] ?? "",
         /example\.invalid|inter-agent-pi\.whl|user:secret/,
+      );
+      assert.doesNotMatch(
+        pi.ctx.widgetRenders.join("\n"),
+        /example\.invalid|inter-agent-pi\.whl|user:secret|custom-python/,
       );
     });
   } finally {

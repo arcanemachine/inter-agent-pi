@@ -23,8 +23,8 @@ import type {
   ExtensionContext,
   Theme,
 } from "@earendil-works/pi-coding-agent";
-import type { AutocompleteItem, Component } from "@earendil-works/pi-tui";
-import { Box, Container, Spacer, Text } from "@earendil-works/pi-tui";
+import type { AutocompleteItem, Component, TUI } from "@earendil-works/pi-tui";
+import { Box, Container, Loader, Spacer, Text } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 import { spawn, ChildProcess } from "node:child_process";
 
@@ -143,6 +143,7 @@ interface RawInterAgentConfig extends Omit<
 
 interface Settings {
   interAgent?: RawInterAgentConfig;
+  "inter-agent"?: RawInterAgentConfig;
 }
 
 function managedRuntimeVenv(): string {
@@ -273,8 +274,10 @@ function loadConfig(): InterAgentConfig {
       const parsed: Settings = JSON.parse(
         readFileSync(globalSettingsPath, "utf-8"),
       );
-      if (parsed.interAgent) {
-        config = mergeConfig(config, parsed.interAgent, globalSettingsPath);
+      for (const configured of [parsed.interAgent, parsed["inter-agent"]]) {
+        if (configured) {
+          config = mergeConfig(config, configured, globalSettingsPath);
+        }
       }
     } catch {
       // Invalid JSON, ignore
@@ -287,8 +290,10 @@ function loadConfig(): InterAgentConfig {
       const parsed: Settings = JSON.parse(
         readFileSync(projectSettingsPath, "utf-8"),
       );
-      if (parsed.interAgent) {
-        config = mergeConfig(config, parsed.interAgent, projectSettingsPath);
+      for (const configured of [parsed.interAgent, parsed["inter-agent"]]) {
+        if (configured) {
+          config = mergeConfig(config, configured, projectSettingsPath);
+        }
       }
     } catch {
       // Invalid JSON, ignore
@@ -1115,9 +1120,12 @@ function setupVersionFailure(output: string): string | null {
     : "Python 3.10 or newer is required";
 }
 
-async function setupManagedRuntime(): Promise<
-  { ok: true } | { ok: false; message: string }
-> {
+type SetupProgress = (message: string) => void;
+
+async function setupManagedRuntime(
+  onProgress?: SetupProgress,
+): Promise<{ ok: true } | { ok: false; message: string }> {
+  const progress = onProgress ?? (() => {});
   const python = setupPython();
   const source = setupSource();
   const state = classifyManagedRuntime();
@@ -1125,6 +1133,7 @@ async function setupManagedRuntime(): Promise<
     return { ok: false, message: `${state.reason}; no files were changed` };
   }
 
+  progress("Checking Python…");
   const version = await runBoundedProcess(python, ["-I", "--version"]);
   if (version.code !== 0) {
     return { ok: false, message: setupProcessFailure("Python check", version) };
@@ -1136,6 +1145,7 @@ async function setupManagedRuntime(): Promise<
 
   let targetState: SafeManagedRuntimeState = state;
   if (targetState.kind === "missing") {
+    progress("Creating Python environment…");
     const created = await runBoundedProcess(python, [
       "-I",
       "-m",
@@ -1149,6 +1159,7 @@ async function setupManagedRuntime(): Promise<
       };
     }
   } else if (targetState.kind === "broken") {
+    progress("Repairing Python environment…");
     const repaired = await runBoundedProcess(python, [
       "-I",
       "-m",
@@ -1163,6 +1174,7 @@ async function setupManagedRuntime(): Promise<
       };
     }
   } else {
+    progress("Checking pip…");
     const pipCheck = await runBoundedProcess(managedPythonPath(), [
       "-I",
       "-m",
@@ -1186,6 +1198,7 @@ async function setupManagedRuntime(): Promise<
             "managed environment pip is unusable and safe repair was not verified",
         };
       }
+      progress("Repairing Python environment…");
       const repaired = await runBoundedProcess(python, [
         "-I",
         "-m",
@@ -1202,6 +1215,7 @@ async function setupManagedRuntime(): Promise<
     }
   }
 
+  progress("Checking pip…");
   const pip = await runBoundedProcess(managedPythonPath(), [
     "-I",
     "-m",
@@ -1215,6 +1229,7 @@ async function setupManagedRuntime(): Promise<
       message: setupProcessFailure("managed pip check", pip),
     };
   }
+  progress("Installing inter-agent helpers…");
   const installed = await runBoundedProcess(managedPythonPath(), [
     "-I",
     "-m",
@@ -1232,6 +1247,7 @@ async function setupManagedRuntime(): Promise<
       message: setupProcessFailure("helper installation", installed),
     };
   }
+  progress("Verifying installed commands…");
   if (!managedHelpersUsable()) {
     return {
       ok: false,
@@ -1671,6 +1687,7 @@ async function startListener(
                 ? buildInboundMessage(meta.sender, meta.body, meta.toInfo)
                 : undefined,
           });
+          updateStatus(ctx, currentConnection);
         }
       } catch {
         // Ignore non-JSON lines
@@ -1875,7 +1892,9 @@ async function stopListener(
 
 function updateStatus(ctx: ExtensionContext, state: ConnectionState | null) {
   if (state?.connected) {
-    ctx.ui.setStatus("inter-agent", `IA: ${state.name} 🌐 `);
+    const unread = mailboxController?.size ?? 0;
+    const suffix = unread > 0 ? ` ✉️x${unread}` : "";
+    ctx.ui.setStatus("inter-agent", `IA: ${state.name}${suffix} 🌐 `);
   } else {
     ctx.ui.setStatus("inter-agent", undefined);
   }
@@ -2125,6 +2144,23 @@ export default function (pi: ExtensionAPI) {
     initialDebounce,
   );
   mailboxController = mailbox;
+  let compactionSettleTimer: ReturnType<typeof setTimeout> | null = null;
+  const cancelCompactionSettle = (): void => {
+    if (compactionSettleTimer !== null) {
+      clearTimeout(compactionSettleTimer);
+      compactionSettleTimer = null;
+    }
+  };
+  const scheduleCompactionSettle = (): void => {
+    cancelCompactionSettle();
+    const runtimeCtx = currentCtx;
+    if (!runtimeCtx) return;
+    compactionSettleTimer = setTimeout(() => {
+      compactionSettleTimer = null;
+      if (currentCtx !== runtimeCtx) return;
+      mailbox.settle();
+    }, 0);
+  };
 
   // ── Custom message renderer ──────────────────────────────────────────────
   // Connection status messages are visible in both the transcript and model
@@ -2284,7 +2320,7 @@ export default function (pi: ExtensionAPI) {
       warnedInvalidMode = true;
       notify(
         "[inter-agent] config",
-        `interAgent.deliveryMode ${JSON.stringify(config.deliveryMode)} is invalid; using "queued"`,
+        `inter-agent.deliveryMode ${JSON.stringify(config.deliveryMode)} is invalid; using "queued"`,
         "warning",
       );
     }
@@ -2292,7 +2328,7 @@ export default function (pi: ExtensionAPI) {
       warnedInvalidDebounce = true;
       notify(
         "[inter-agent] config",
-        `interAgent.mailboxNoticeDebounceMs is invalid; using ${MAILBOX_NOTICE_DEBOUNCE_MS_DEFAULT} ms`,
+        `inter-agent.mailboxNoticeDebounceMs is invalid; using ${MAILBOX_NOTICE_DEBOUNCE_MS_DEFAULT} ms`,
         "warning",
       );
     }
@@ -2344,6 +2380,7 @@ export default function (pi: ExtensionAPI) {
   });
 
   pi.on("session_shutdown", async (event, ctx) => {
+    cancelCompactionSettle();
     // Fail active control work before the listener is stopped so best-effort
     // failure responses can still reach controllers; same-process reload uses
     // target_reloading, every other shutdown reason target_disconnected.
@@ -2410,6 +2447,17 @@ export default function (pi: ExtensionAPI) {
     return {
       systemPrompt: event.systemPrompt + instruction,
     };
+  });
+
+  // Manual compaction reaches its terminal idle state without an
+  // `agent_settled` event. Defer one settle pass until the compaction event
+  // has returned and Pi has cleared its compaction state. The runtime guard
+  // prevents a retiring extension from mutating a reloaded session.
+  pi.on("session_compact", () => {
+    scheduleCompactionSettle();
+  });
+  pi.on("session_compact_failed", () => {
+    scheduleCompactionSettle();
   });
 
   // When the agent run has fully settled (after retries, compaction, and queued
@@ -2889,6 +2937,13 @@ export default function (pi: ExtensionAPI) {
 
   async function handleDelivery(args: string, _ctx: ExtensionContext) {
     const raw = args.trim();
+    if (!raw) {
+      notify(
+        "[inter-agent] delivery",
+        `current delivery mode: ${mailbox.getDeliveryMode()}`,
+      );
+      return;
+    }
     const first = raw.charAt(0).toLowerCase();
     const mode = first === "i" ? "immediate" : first === "q" ? "queued" : raw;
     if (mode !== "queued" && mode !== "immediate") {
@@ -2982,6 +3037,7 @@ export default function (pi: ExtensionAPI) {
       return;
     }
     const removal = mailbox.read(selected.map((entry) => entry.msgId));
+    updateStatus(ctx, currentConnection);
     if (removal.missing.length > 0 || removal.read.length !== selected.length) {
       notify(
         "[inter-agent] flush failed",
@@ -3042,20 +3098,52 @@ export default function (pi: ExtensionAPI) {
       return;
     }
 
-    const result = await setupManagedRuntime();
-    if ("message" in result) {
-      notifyCommandFailure(
-        "[inter-agent] setup failed",
-        result.message,
-        "doctor",
-      );
-      return;
+    const setupWidgetKey = "inter-agent-setup";
+    let setupLoader: Loader | null = null;
+    let setupMessage = "Setting up inter-agent…";
+    const updateSetupProgress: SetupProgress = (message) => {
+      setupMessage = `Setting up inter-agent… ${message}`;
+      setupLoader?.setMessage(setupMessage);
+    };
+
+    if (ctx.mode === "tui") {
+      ctx.ui.setWidget(setupWidgetKey, (tui, theme) => {
+        const loader = new Loader(
+          tui as unknown as TUI,
+          (text) => theme.fg("accent", text),
+          (text) => theme.fg("dim", text),
+          setupMessage,
+        );
+        setupLoader = loader;
+        const component = loader as Loader & { dispose?: () => void };
+        component.dispose = () => {
+          loader.stop();
+          if (setupLoader === loader) setupLoader = null;
+        };
+        return component;
+      });
     }
-    notify(
-      "[inter-agent] setup",
-      `managed helper environment ready at ${managedRuntimeVenv()}.${overrideWarning ? ` ${overrideWarning}.` : ""}`,
-      overrideWarning ? "warning" : "info",
-    );
+
+    try {
+      const result = await setupManagedRuntime(updateSetupProgress);
+      if ("message" in result) {
+        notifyCommandFailure(
+          "[inter-agent] setup failed",
+          result.message,
+          "doctor",
+        );
+        return;
+      }
+      notify(
+        "[inter-agent] setup",
+        `managed helper environment ready at ${managedRuntimeVenv()}.${overrideWarning ? ` ${overrideWarning}.` : ""}`,
+        overrideWarning ? "warning" : "info",
+      );
+    } finally {
+      setupLoader?.stop();
+      setupLoader = null;
+      if (ctx.mode === "tui") ctx.ui.setWidget(setupWidgetKey, undefined);
+    }
   }
 
   async function handleList(_args: string, _ctx: ExtensionContext) {
@@ -3505,6 +3593,9 @@ export default function (pi: ExtensionAPI) {
     async execute(_toolCallId, params, _signal, _onUpdate, _ctx) {
       const { ids } = params as { ids?: string[] };
       const result = mailbox.read(ids);
+      if (currentCtx && currentConnection) {
+        updateStatus(currentCtx, currentConnection);
+      }
       const readLines = result.read.map((m) => {
         const where = m.channel
           ? ` on ${m.channel}`

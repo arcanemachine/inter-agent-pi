@@ -7,7 +7,14 @@ the split-generation source extracted from the coordinated monorepo
 
 ## Unreleased
 
-No unreleased changes.
+- Show native setup progress and clean up the loader after success, failure,
+  cancellation, or reload.
+- Show unread mailbox counts in the connected footer and expose the current
+  delivery mode through `/inter-agent delivery` without arguments.
+- Accept the extension's hyphenated `inter-agent` settings namespace while
+  retaining the legacy `interAgent` form.
+- Flush pending inbound messages after successful or failed manual compaction
+  without allowing a retiring runtime's deferred callback to affect a reload.
 
 ## 0.5.2 — User-focused documentation
 

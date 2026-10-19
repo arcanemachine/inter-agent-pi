@@ -29,7 +29,7 @@ Open Pi, then install the compatible Python helper in Pi's managed environment:
 /inter-agent setup
 ```
 
-Review and approve the requested setup operation. The extension creates or updates `$HOME/.pi/agent/inter-agent/venv`; normal installation does not require `sudo`, a global Python package, or `uv`.
+Review and approve the requested setup operation. While setup runs, Pi shows an animated loader with the current step. The extension creates or updates `$HOME/.pi/agent/inter-agent/venv`; normal installation does not require `sudo`, a global Python package, or `uv`.
 
 After installing and opening Pi, run `/inter-agent setup` for the approved managed helper installation. Restart Pi after installation, or use `/reload` in an existing session.
 
@@ -83,11 +83,12 @@ Incoming direct messages, broadcasts, and channel publications use one of two de
 | `queued`    | Default. Stores bodies in the in-memory mailbox and shows a metadata-only notice. The model reads messages with `inter_agent_read_messages`, or the user flushes them into context. |
 | `immediate` | Places future message bodies directly into follow-up context. An idle Pi starts a turn immediately; a busy Pi holds arrivals until the active work settles.                         |
 
-Select a mode for the current Pi runtime:
+Select a mode for the current Pi runtime, or query the current mode without changing it:
 
 ```text
 /inter-agent delivery immediate
 /inter-agent delivery queued
+/inter-agent delivery
 ```
 
 The command affects future arrivals only. Existing unread messages remain queued. To make immediate delivery the configured default, add this to Pi's global or project settings and reload Pi:
@@ -100,7 +101,7 @@ The command affects future arrivals only. Existing unread messages remain queued
 }
 ```
 
-The mailbox holds at most 128 unread messages. When it is full, the oldest unread message is evicted. A same-process `/reload` preserves unread messages; a process restart starts with an empty mailbox.
+The mailbox holds at most 128 unread messages. When it is full, the oldest unread message is evicted. A same-process `/reload` preserves unread messages; a process restart starts with an empty mailbox. While connected, the Pi footer shows the routing name and unread count, for example `IA: someone ✉️x3 🌐 `; with no unread messages it shows `IA: someone 🌐 `.
 
 Use `/inter-agent flush [count]` to move queued messages into context without waiting for the model to call a tool. With no count, it flushes every unread message. With a count, it flushes the oldest messages up to that count. The selected batch enters context in arrival order and triggers one turn. Flushed messages are removed from the unread mailbox.
 
@@ -121,7 +122,7 @@ All user commands are grouped under `/inter-agent`:
 | `unsubscribe <channel>`             | Leave a channel.                                                               |
 | `publish <channel> <text>`          | Publish a message to a channel.                                                |
 | `channels`                          | Inspect active channels and subscribers.                                       |
-| `delivery <queued\|immediate>`      | Select the delivery mode for future arrivals in this runtime.                  |
+| `delivery [queued\|immediate]`      | Show the current mode, or select the mode for future arrivals in this runtime. |
 | `flush [count]`                     | Move all or the oldest selected unread messages into context.                  |
 | `status`                            | Show helper, endpoint, and server status.                                      |
 | `doctor [optional context]`         | Run bounded, read-only integration diagnostics.                                |
@@ -146,7 +147,7 @@ For the lower-level Python adapter commands and machine-readable output, see [`s
 
 ## Configuration
 
-The extension reads `interAgent` settings from:
+The extension reads `inter-agent` settings from the following locations. The legacy `interAgent` namespace is also accepted:
 
 1. global `~/.pi/agent/settings.json`;
 2. project `.pi/settings.json`.
@@ -157,7 +158,7 @@ A representative configuration is:
 
 ```json
 {
-  "interAgent": {
+  "inter-agent": {
     "host": "127.0.0.1",
     "port": 16837,
     "deliveryMode": "immediate",
@@ -190,7 +191,7 @@ Invalid delivery or debounce values fall back to their defaults with a warning.
 The extension selects the Python helper in this order:
 
 1. `INTER_AGENT_PI_HELPER`, when explicitly set to a compatible `inter-agent-pi` executable;
-2. `interAgent.projectPaths`, using the first checkout whose `.venv/bin` contains compatible `inter-agent-pi`, `inter-agent-connect`, and `inter-agent-server` executables;
+2. `inter-agent.projectPaths`, using the first checkout whose `.venv/bin` contains compatible `inter-agent-pi`, `inter-agent-connect`, and `inter-agent-server` executables;
 3. Pi's managed environment at `$HOME/.pi/agent/inter-agent/venv/bin`;
 4. compatible `inter-agent-*` executables on `PATH`.
 
